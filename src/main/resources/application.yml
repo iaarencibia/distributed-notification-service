@@ -1,0 +1,124 @@
+spring:
+  application:
+    name: notification-service
+
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/notifications}
+    username: ${DB_USERNAME:notifications}
+    password: ${DB_PASSWORD:notifications}
+    hikari:
+      # The dispatch worker releases its connection before performing any network I/O,
+      # so the pool only ever covers short transactions.
+      maximum-pool-size: ${DB_POOL_SIZE:10}
+      connection-timeout: 3000
+
+  jpa:
+    # Hibernate never creates or alters the schema; Flyway owns it. `validate` turns a
+    # drift between entity and migration into a startup failure instead of a runtime one.
+    hibernate:
+      ddl-auto: validate
+    # Disabled deliberately: an open session in the view layer hides lazy loading in the
+    # HTTP thread and holds a connection for the whole request.
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: false
+
+  jackson:
+    default-property-inclusion: non_null
+
+server:
+  port: ${SERVER_PORT:8080}
+  error:
+    # Error responses are produced by the exception handler as RFC 7807 problem details.
+    include-message: never
+    include-stacktrace: never
+  shutdown: graceful
+
+logging:
+  structured:
+    format:
+      # Structured JSON on stdout, required by the brief. ECS gives a documented schema
+      # instead of an ad-hoc one, so any log backend can ingest it without a custom parser.
+      console: ecs
+    ecs:
+      service:
+        name: notification-service
+        version: ${spring.application.version:0.1.0}
+        # Same identifier the dispatcher writes into notification.claimed_by, so a log
+        # line can be tied back to the instance that owned the row.
+        node-name: ${notifications.instance-id}
+  level:
+    io.github.iaarencibia.notifications: ${LOG_LEVEL_APP:DEBUG}
+    org.springframework.web: INFO
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      # Liveness and readiness are separated so the container orchestrator can tell
+      # "starting up" apart from "broken".
+      probes:
+        enabled: true
+      show-details: when_authorized
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+  metrics:
+    tags:
+      application: notification-service
+
+# ---------------------------------------------------------------------------
+# Application-specific configuration, bound to typed @ConfigurationProperties.
+# ---------------------------------------------------------------------------
+notifications:
+  # Identifies this instance. Written to notification.claimed_by when a row is claimed,
+  # and emitted on every log line, so ownership of in-flight work is always traceable.
+  # In Docker this resolves to the container hostname; each replica gets a distinct one.
+  instance-id: ${INSTANCE_ID:${HOSTNAME:local}}
+
+  security:
+    # Overridden in docker-compose. The default exists so the app starts on a clean
+    # checkout; it is documented in the README as a development-only credential.
+    api-key: ${NOTIFICATIONS_API_KEY:local-dev-api-key-change-me}
+
+  dispatch:
+    # How often the worker looks for claimable rows. This interval is the floor on
+    # dispatch latency; it is the price paid for not running a broker.
+    poll-interval: ${DISPATCH_POLL_INTERVAL:1s}
+    # Rows claimed per poll, per instance.
+    batch-size: ${DISPATCH_BATCH_SIZE:25}
+    # Concurrency inside a single instance. Bounded on purpose: an unbounded pool would
+    # turn a slow downstream service into unbounded memory growth.
+    worker-pool-size: ${DISPATCH_WORKER_POOL_SIZE:8}
+    worker-queue-capacity: ${DISPATCH_WORKER_QUEUE_CAPACITY:100}
+
+  reaper:
+    # A row left in DISPATCHING for longer than this is assumed to belong to an instance
+    # that died mid-dispatch, and is returned to PENDING.
+    stale-claim-timeout: ${REAPER_STALE_CLAIM_TIMEOUT:5m}
+    interval: ${REAPER_INTERVAL:1m}
+
+  retry:
+    max-attempts: ${RETRY_MAX_ATTEMPTS:3}
+    initial-backoff: ${RETRY_INITIAL_BACKOFF:5s}
+    multiplier: ${RETRY_MULTIPLIER:3.0}
+    max-backoff: ${RETRY_MAX_BACKOFF:5m}
+    # Random fraction added to each delay so retries from many rows do not align.
+    jitter: ${RETRY_JITTER:0.2}
+
+  channels:
+    service:
+      connect-timeout: ${SERVICE_CHANNEL_CONNECT_TIMEOUT:2s}
+      read-timeout: ${SERVICE_CHANNEL_READ_TIMEOUT:5s}

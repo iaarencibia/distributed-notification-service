@@ -1,0 +1,30 @@
+# --- Build output ---
+target/
+build/
+!.mvn/wrapper/maven-wrapper.jar
+
+# --- IDE ---
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.project
+.classpath
+nbproject/
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Logs & local runtime ---
+*.log
+logs/
+
+# --- Local environment overrides ---
+.env
+.env.local
+src/main/resources/application-local.yml
+

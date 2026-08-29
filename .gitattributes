@@ -1,0 +1,11 @@
+# Normalise line endings on commit. The build and the runtime are Linux; CRLF leaking
+# into shell scripts or Dockerfiles breaks them in ways that are painful to diagnose.
+* text=auto eol=lf
+
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+*.jar   binary
+*.png   binary
+*.jpg   binary
+*.pdf   binary

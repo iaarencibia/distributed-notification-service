@@ -1,0 +1,12 @@
+{
+  "name": "Downstream service that rejects the payload (permanent failure)",
+  "request": {
+    "method": "POST",
+    "urlPath": "/hook/broken"
+  },
+  "response": {
+    "status": 400,
+    "headers": { "Content-Type": "application/json" },
+    "jsonBody": { "error": "unsupported payload" }
+  }
+}

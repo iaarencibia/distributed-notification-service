@@ -1,0 +1,13 @@
+# Keep the build context small: only pom.xml and src are needed to produce the image.
+target/
+.git/
+.gitignore
+.gitattributes
+.idea/
+.vscode/
+*.iml
+*.md
+docker-compose*.yml
+Dockerfile
+.env
+.env.local

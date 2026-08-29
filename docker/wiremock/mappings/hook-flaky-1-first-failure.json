@@ -1,0 +1,15 @@
+{
+  "name": "Flaky downstream: first call fails with 503",
+  "scenarioName": "flaky-downstream",
+  "requiredScenarioState": "Started",
+  "newScenarioState": "one-failure-recorded",
+  "request": {
+    "method": "POST",
+    "urlPath": "/hook/flaky"
+  },
+  "response": {
+    "status": 503,
+    "headers": { "Content-Type": "application/json" },
+    "jsonBody": { "error": "service unavailable" }
+  }
+}

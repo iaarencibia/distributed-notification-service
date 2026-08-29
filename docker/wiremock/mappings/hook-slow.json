@@ -1,0 +1,13 @@
+{
+  "name": "Downstream service that exceeds the read timeout",
+  "request": {
+    "method": "POST",
+    "urlPath": "/hook/slow"
+  },
+  "response": {
+    "status": 200,
+    "fixedDelayMilliseconds": 15000,
+    "headers": { "Content-Type": "application/json" },
+    "jsonBody": { "accepted": true }
+  }
+}

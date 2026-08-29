@@ -1,0 +1,92 @@
+# Full stack for the notification hub.
+#
+#   docker compose up --build
+#
+# Nothing else is required on the host: the application is compiled inside its own
+# build stage, so neither Java nor Maven need to be installed.
+
+services:
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: notifications-postgres
+    environment:
+      # Development defaults, applied when nothing overrides them, so that the stack
+      # starts on a clean checkout with no prior setup. Exporting the variable — or
+      # placing it in a .env file, which Compose reads on its own — replaces the value
+      # without editing this file.
+      #
+      # The same three variables are reused by the application service below, so the
+      # credentials cannot drift between the database and the client that connects to it.
+      POSTGRES_DB: ${POSTGRES_DB:-notifications}
+      POSTGRES_USER: ${POSTGRES_USER:-notifications}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-notifications}
+    ports:
+      # Exposed so the schema and notification states can be inspected from the host.
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # The application waits for this to pass; Flyway must not run against a database
+      # that is still initialising.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-notifications} -d ${POSTGRES_DB:-notifications}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  wiremock:
+    # Stands in for the external service targeted by the SERVICE channel. Its stubs are
+    # preloaded with the three outcomes the dispatcher must distinguish: success,
+    # transient failure that recovers, and permanent rejection.
+    image: wiremock/wiremock:3.13.2
+    container_name: notifications-wiremock
+    # Deliberately not started with --verbose: the logs that matter belong to the
+    # application. What WireMock received is available on demand at /__admin/requests.
+    command: ["--disable-banner"]
+    ports:
+      - "8081:8080"
+    volumes:
+      # Not mounted read-only: WireMock writes its request journal under this directory.
+      - ./docker/wiremock:/home/wiremock
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/__admin/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # Named explicitly so the image does not inherit the name of whatever directory
+    # the repository happens to be cloned into.
+    image: notification-service:0.1.0
+    container_name: notifications-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      wiremock:
+        condition: service_started
+    environment:
+      # Same variables as the postgres service: one source of truth for the credentials.
+      DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-notifications}
+      DB_USERNAME: ${POSTGRES_USER:-notifications}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-notifications}
+      # Development credential. Documented in the README; rotated per environment in
+      # any real deployment.
+      NOTIFICATIONS_API_KEY: ${NOTIFICATIONS_API_KEY:-local-dev-api-key-change-me}
+      LOG_LEVEL_APP: ${LOG_LEVEL_APP:-DEBUG}
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health/readiness || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 40s
+    restart: unless-stopped
+
+volumes:
+  postgres-data:

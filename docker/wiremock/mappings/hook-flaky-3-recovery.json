@@ -1,0 +1,14 @@
+{
+  "name": "Flaky downstream: third call succeeds",
+  "scenarioName": "flaky-downstream",
+  "requiredScenarioState": "two-failures-recorded",
+  "request": {
+    "method": "POST",
+    "urlPath": "/hook/flaky"
+  },
+  "response": {
+    "status": 200,
+    "headers": { "Content-Type": "application/json" },
+    "jsonBody": { "accepted": true, "recoveredAfterRetries": 2 }
+  }
+}

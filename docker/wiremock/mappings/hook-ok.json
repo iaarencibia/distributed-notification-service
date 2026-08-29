@@ -1,0 +1,12 @@
+{
+  "name": "Downstream service that always accepts the notification",
+  "request": {
+    "method": "POST",
+    "urlPath": "/hook/ok"
+  },
+  "response": {
+    "status": 200,
+    "headers": { "Content-Type": "application/json" },
+    "jsonBody": { "accepted": true }
+  }
+}

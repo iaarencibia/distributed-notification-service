@@ -88,5 +88,20 @@ services:
       start_period: 40s
     restart: unless-stopped
 
+  test:
+    # Maven toolchain for the test suite, identical to the one the Dockerfile uses to build
+    # the jar, so that running the tests requires neither Java nor Maven on the host.
+    #
+    # The profile keeps it out of `docker compose up`: it is tooling, not part of the running
+    # system. Usage is documented in the README, under "Cómo correr los tests".
+    profiles: ["test"]
+    image: maven:3.9-eclipse-temurin-21
+    volumes:
+      - .:/build
+      - maven-repo:/root/.m2
+    working_dir: /build
+    command: ["mvn", "-B", "-ntp", "test"]
+
 volumes:
   postgres-data:
+  maven-repo:

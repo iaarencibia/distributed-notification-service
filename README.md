@@ -12,6 +12,7 @@ con reintentos y registro de fallos.
 - [Precondiciones](#precondiciones)
 - [Cómo levantar el proyecto](#cómo-levantar-el-proyecto)
 - [Cómo inspeccionar el estado](#cómo-inspeccionar-el-estado)
+- [Cómo correr los tests](#cómo-correr-los-tests)
 - [Decisiones de diseño](#decisiones-de-diseño)
 - [Trade-offs y limitaciones](#trade-offs-y-limitaciones)
 - [Estado de la implementación](#estado-de-la-implementación)
@@ -161,6 +162,46 @@ comparación en el contador de intentos.
 >
 > WireMock responde con un cuerpo vacío, así que conviene el `-i` para ver la confirmación:
 > la primera línea de la respuesta debe ser `HTTP/1.1 200 OK`.
+
+---
+
+## Cómo correr los tests
+
+Los tests se ejecutan dentro de la misma imagen que compila la aplicación, de modo que no
+requieren Java ni Maven instalados en la máquina. Desde la raíz del repositorio:
+
+```bash
+docker compose run --rm test
+```
+
+El comando es idéntico en cualquier intérprete —`cmd`, PowerShell o un shell POSIX—, ya que
+las rutas las resuelve Compose y no el intérprete.
+
+Salida esperada:
+
+```
+[INFO] Results:
+[INFO]
+[INFO] Tests run: 95, Failures: 0, Errors: 0, Skipped: 0
+[INFO] BUILD SUCCESS
+```
+
+El número de tests crece a medida que avanza la implementación; lo que debe verificarse es
+que `Failures` y `Errors` sean cero.
+
+Para ejecutar una única clase, los argumentos que se añaden reemplazan al comando por
+defecto del servicio:
+
+```bash
+docker compose run --rm test mvn -B -ntp test -Dtest=NotificationStatusTest
+```
+
+Dos notas sobre el servicio `test`:
+
+- Está asignado a un perfil, de modo que **no interviene en `docker compose up`**. Es
+  herramienta de desarrollo, no parte del sistema en ejecución.
+- Las dependencias se guardan en un volumen con nombre, así que solo la primera ejecución
+  paga la descarga. Las siguientes tardan unos segundos.
 
 ---
 

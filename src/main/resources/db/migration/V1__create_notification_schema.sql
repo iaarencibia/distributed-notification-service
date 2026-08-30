@@ -140,5 +140,10 @@ CREATE TABLE notification_attempt
     CONSTRAINT ck_attempt_outcome
         CHECK (outcome IN ('SUCCESS', 'RETRYABLE_FAILURE', 'PERMANENT_FAILURE')),
     CONSTRAINT ck_attempt_number
-        CHECK (attempt_number >= 1)
+        CHECK (attempt_number >= 1),
+    -- A failed attempt with no recorded reason cannot answer the one question this table
+    -- exists to answer. Enforced here and not only in the domain because the row outlives
+    -- the object that created it, and a later reader has nothing else to rely on.
+    CONSTRAINT ck_attempt_failure_has_reason
+        CHECK (outcome = 'SUCCESS' OR (error_message IS NOT NULL AND error_message <> ''))
 );

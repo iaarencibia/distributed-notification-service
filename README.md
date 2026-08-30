@@ -372,6 +372,14 @@ mecanismos está pendiente**, pero la decisión ya está tomada y el esquema la 
   exigirla llevaría a que quien no le da importancia genere una distinta en cada llamada,
   lo que elimina la protección conservando su apariencia.
 
+El *reaper* se ejecuta como una única sentencia `UPDATE` en bloque, y no cargando cada
+notificación vencida para liberarla de a una. Es **la única transición del ciclo de vida que
+no atraviesa el modelo de dominio**, y la excepción es deliberada: liberar *N* reclamos
+caducados cuesta una consulta en lugar de *N*, y devolver una fila a `PENDING` por vencimiento
+es una tarea de mantenimiento del sistema, no una regla de negocio de la notificación. Lo que
+protege esa escritura es el check constraint `ck_notification_status`, que rechazaría un
+estado inválido con independencia del camino por el que llegue.
+
 ---
 
 ## Trade-offs y limitaciones
@@ -396,6 +404,21 @@ destino, dejar de intentar durante un intervalo y reprogramar sus notificaciones
 consumirles intentos. Se descartó por alcance —implica una dependencia adicional, estado por
 host y decidir el tratamiento de las notificaciones mientras el circuito está abierto—, y
 ese tiempo se destinó a los tests y a la documentación.
+
+### Una notificación fallida no puede reencolarse
+
+`FAILED` es un estado terminal: no existe operación que devuelva una notificación agotada a
+`PENDING`. Tras una interrupción prolongada de un destino, las notificaciones que consumieron
+sus intentos quedan registradas con su motivo, pero no vuelven a intentarse. Recuperarlas
+exige una modificación manual sobre la base de datos.
+
+La solución sería un endpoint de reintento explícito. Se dejó fuera porque reabrir un estado
+terminal plantea decisiones que no son mecánicas: si el contador de intentos se reinicia o se
+amplía el presupuesto, qué ocurre cuando la operación se invoca dos veces, y quién queda
+autorizado a hacerlo. Resolverlas a medias produciría un mecanismo peor que su ausencia.
+
+La contrapartida de mantenerlo terminal es que el recuento permanece auditable: `attempts`
+nunca se reinicia, de modo que ningún reencolado puede ocultar los intentos ya realizados.
 
 ### Los destinos del canal `SERVICE` no están restringidos
 
@@ -451,10 +474,11 @@ el trabajo del despachador, pero eso mitiga el problema sin resolverlo.
 | Estructura del proyecto y arquitectura hexagonal | Completo |
 | Esquema de base de datos y migraciones | Completo |
 | Stack de Docker Compose | Completo |
-| Modelo de dominio y máquina de estados | Pendiente |
+| Modelo de dominio y máquina de estados | Completo |
 | API REST de creación y consulta | Pendiente |
 | Idempotencia de entrada (`Idempotency-Key`) y de salida (`X-Notification-Id`) | Pendiente |
 | Autenticación | Pendiente |
 | Worker de despacho y canales | Pendiente |
-| Tests unitarios y de integración | Pendiente |
+| Tests unitarios del dominio | Completo |
+| Tests de integración | Pendiente |
 | Consideración sobre Jakarta EE | Pendiente |

@@ -184,7 +184,7 @@ Un worker reclama trabajo con:
 ```sql
 SELECT ... FROM notification
 WHERE status = 'PENDING' AND next_attempt_at <= now()
-ORDER BY priority_rank, created_at
+ORDER BY priority_rank, next_attempt_at, created_at
 LIMIT :batch
 FOR UPDATE SKIP LOCKED
 ```

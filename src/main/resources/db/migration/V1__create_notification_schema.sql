@@ -75,8 +75,13 @@ CREATE TABLE notification
 -- to the backlog rather than to the full history. A table holding millions of SENT rows
 -- keeps a small, cache-resident index.
 --
--- Column order matches the claim query's ORDER BY, so rows are visited highest priority
--- first and oldest first within a priority.
+-- Column order matches the claim query's ORDER BY exactly -- priority_rank,
+-- next_attempt_at, created_at -- so the rows come out already ordered and no sort is
+-- needed: highest priority first, and within a priority the one that has been due longest.
+--
+-- Ordered by next_attempt_at rather than created_at on purpose. A notification returning
+-- from a backoff asked to wait; letting it overtake one that has been waiting since it
+-- arrived would reward having failed. created_at remains as a deterministic tiebreaker.
 CREATE INDEX idx_notification_claimable
     ON notification (priority_rank, next_attempt_at, created_at)
     WHERE status = 'PENDING';

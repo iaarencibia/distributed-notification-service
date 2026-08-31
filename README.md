@@ -12,6 +12,7 @@ con reintentos y registro de fallos.
 - [Precondiciones](#precondiciones)
 - [Cómo levantar el proyecto](#cómo-levantar-el-proyecto)
 - [Cómo inspeccionar el estado](#cómo-inspeccionar-el-estado)
+- [Cómo correr los tests](#cómo-correr-los-tests)
 - [Decisiones de diseño](#decisiones-de-diseño)
 - [Trade-offs y limitaciones](#trade-offs-y-limitaciones)
 - [Estado de la implementación](#estado-de-la-implementación)
@@ -164,6 +165,46 @@ comparación en el contador de intentos.
 
 ---
 
+## Cómo correr los tests
+
+Los tests se ejecutan dentro de la misma imagen que compila la aplicación, de modo que no
+requieren Java ni Maven instalados en la máquina. Desde la raíz del repositorio:
+
+```bash
+docker compose run --rm test
+```
+
+El comando es idéntico en cualquier intérprete —`cmd`, PowerShell o un shell POSIX—, ya que
+las rutas las resuelve Compose y no el intérprete.
+
+Salida esperada:
+
+```
+[INFO] Results:
+[INFO]
+[INFO] Tests run: 95, Failures: 0, Errors: 0, Skipped: 0
+[INFO] BUILD SUCCESS
+```
+
+El número de tests crece a medida que avanza la implementación; lo que debe verificarse es
+que `Failures` y `Errors` sean cero.
+
+Para ejecutar una única clase, los argumentos que se añaden reemplazan al comando por
+defecto del servicio:
+
+```bash
+docker compose run --rm test mvn -B -ntp test -Dtest=NotificationStatusTest
+```
+
+Dos notas sobre el servicio `test`:
+
+- Está asignado a un perfil, de modo que **no interviene en `docker compose up`**. Es
+  herramienta de desarrollo, no parte del sistema en ejecución.
+- Las dependencias se guardan en un volumen con nombre, así que solo la primera ejecución
+  paga la descarga. Las siguientes tardan unos segundos.
+
+---
+
 ## Decisiones de diseño
 
 ### Outbox transaccional en lugar de un broker de mensajes
@@ -184,7 +225,7 @@ Un worker reclama trabajo con:
 ```sql
 SELECT ... FROM notification
 WHERE status = 'PENDING' AND next_attempt_at <= now()
-ORDER BY priority_rank, created_at
+ORDER BY priority_rank, next_attempt_at, created_at
 LIMIT :batch
 FOR UPDATE SKIP LOCKED
 ```
@@ -331,6 +372,14 @@ mecanismos está pendiente**, pero la decisión ya está tomada y el esquema la 
   exigirla llevaría a que quien no le da importancia genere una distinta en cada llamada,
   lo que elimina la protección conservando su apariencia.
 
+El *reaper* se ejecuta como una única sentencia `UPDATE` en bloque, y no cargando cada
+notificación vencida para liberarla de a una. Es **la única transición del ciclo de vida que
+no atraviesa el modelo de dominio**, y la excepción es deliberada: liberar *N* reclamos
+caducados cuesta una consulta en lugar de *N*, y devolver una fila a `PENDING` por vencimiento
+es una tarea de mantenimiento del sistema, no una regla de negocio de la notificación. Lo que
+protege esa escritura es el check constraint `ck_notification_status`, que rechazaría un
+estado inválido con independencia del camino por el que llegue.
+
 ---
 
 ## Trade-offs y limitaciones
@@ -355,6 +404,21 @@ destino, dejar de intentar durante un intervalo y reprogramar sus notificaciones
 consumirles intentos. Se descartó por alcance —implica una dependencia adicional, estado por
 host y decidir el tratamiento de las notificaciones mientras el circuito está abierto—, y
 ese tiempo se destinó a los tests y a la documentación.
+
+### Una notificación fallida no puede reencolarse
+
+`FAILED` es un estado terminal: no existe operación que devuelva una notificación agotada a
+`PENDING`. Tras una interrupción prolongada de un destino, las notificaciones que consumieron
+sus intentos quedan registradas con su motivo, pero no vuelven a intentarse. Recuperarlas
+exige una modificación manual sobre la base de datos.
+
+La solución sería un endpoint de reintento explícito. Se dejó fuera porque reabrir un estado
+terminal plantea decisiones que no son mecánicas: si el contador de intentos se reinicia o se
+amplía el presupuesto, qué ocurre cuando la operación se invoca dos veces, y quién queda
+autorizado a hacerlo. Resolverlas a medias produciría un mecanismo peor que su ausencia.
+
+La contrapartida de mantenerlo terminal es que el recuento permanece auditable: `attempts`
+nunca se reinicia, de modo que ningún reencolado puede ocultar los intentos ya realizados.
 
 ### Los destinos del canal `SERVICE` no están restringidos
 
@@ -410,10 +474,11 @@ el trabajo del despachador, pero eso mitiga el problema sin resolverlo.
 | Estructura del proyecto y arquitectura hexagonal | Completo |
 | Esquema de base de datos y migraciones | Completo |
 | Stack de Docker Compose | Completo |
-| Modelo de dominio y máquina de estados | Pendiente |
+| Modelo de dominio y máquina de estados | Completo |
 | API REST de creación y consulta | Pendiente |
 | Idempotencia de entrada (`Idempotency-Key`) y de salida (`X-Notification-Id`) | Pendiente |
 | Autenticación | Pendiente |
 | Worker de despacho y canales | Pendiente |
-| Tests unitarios y de integración | Pendiente |
+| Tests unitarios del dominio | Completo |
+| Tests de integración | Pendiente |
 | Consideración sobre Jakarta EE | Pendiente |

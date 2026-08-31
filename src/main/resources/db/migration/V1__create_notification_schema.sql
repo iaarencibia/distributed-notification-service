@@ -75,8 +75,13 @@ CREATE TABLE notification
 -- to the backlog rather than to the full history. A table holding millions of SENT rows
 -- keeps a small, cache-resident index.
 --
--- Column order matches the claim query's ORDER BY, so rows are visited highest priority
--- first and oldest first within a priority.
+-- Column order matches the claim query's ORDER BY exactly -- priority_rank,
+-- next_attempt_at, created_at -- so the rows come out already ordered and no sort is
+-- needed: highest priority first, and within a priority the one that has been due longest.
+--
+-- Ordered by next_attempt_at rather than created_at on purpose. A notification returning
+-- from a backoff asked to wait; letting it overtake one that has been waiting since it
+-- arrived would reward having failed. created_at remains as a deterministic tiebreaker.
 CREATE INDEX idx_notification_claimable
     ON notification (priority_rank, next_attempt_at, created_at)
     WHERE status = 'PENDING';
@@ -135,5 +140,10 @@ CREATE TABLE notification_attempt
     CONSTRAINT ck_attempt_outcome
         CHECK (outcome IN ('SUCCESS', 'RETRYABLE_FAILURE', 'PERMANENT_FAILURE')),
     CONSTRAINT ck_attempt_number
-        CHECK (attempt_number >= 1)
+        CHECK (attempt_number >= 1),
+    -- A failed attempt with no recorded reason cannot answer the one question this table
+    -- exists to answer. Enforced here and not only in the domain because the row outlives
+    -- the object that created it, and a later reader has nothing else to rely on.
+    CONSTRAINT ck_attempt_failure_has_reason
+        CHECK (outcome = 'SUCCESS' OR (error_message IS NOT NULL AND error_message <> ''))
 );

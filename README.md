@@ -108,18 +108,16 @@ docker compose logs -f app
 El estado de las notificaciones vive en la base de datos y se puede consultar directamente:
 
 ```bash
-docker compose exec postgres psql -U notifications -d notifications \
-  -c "SELECT id, channel, status, attempts, next_attempt_at, last_error
-      FROM notification ORDER BY created_at DESC LIMIT 10;"
+docker compose exec postgres psql -U notifications -d notifications -c "SELECT id, channel, status, attempts, next_attempt_at, last_error FROM notification ORDER BY created_at DESC LIMIT 10;"
 ```
+
+Los valores `-U` y `-d` son los del servicio de PostgreSQL; si los cambiaste con
+`POSTGRES_USER` o `POSTGRES_DB`, ajustalos aquí también.
 
 El historial completo de intentos de una notificación:
 
 ```bash
-docker compose exec postgres psql -U notifications -d notifications \
-  -c "SELECT attempt_number, outcome, response_code, duration_ms, error_message
-      FROM notification_attempt WHERE notification_id = '<uuid>'
-      ORDER BY attempt_number;"
+docker compose exec postgres psql -U notifications -d notifications -c "SELECT attempt_number, outcome, response_code, duration_ms, error_message FROM notification_attempt WHERE notification_id = '<uuid>' ORDER BY attempt_number;"
 ```
 
 ### Destinos simulados de WireMock

@@ -11,6 +11,7 @@ con reintentos y registro de fallos.
 
 - [Precondiciones](#precondiciones)
 - [Cómo levantar el proyecto](#cómo-levantar-el-proyecto)
+- [Credenciales de prueba](#credenciales-de-prueba)
 - [Cómo inspeccionar el estado](#cómo-inspeccionar-el-estado)
 - [Cómo correr los tests](#cómo-correr-los-tests)
 - [Decisiones de diseño](#decisiones-de-diseño)
@@ -70,7 +71,7 @@ Los servicios que quedan disponibles son:
 | Servicio | URL | Rol |
 | --- | --- | --- |
 | Aplicación | http://localhost:8080 | El servicio de notificaciones |
-| PostgreSQL | `localhost:5432` | Persistencia y cola. Usuario, contraseña y nombre de base de datos: `notifications` |
+| PostgreSQL | `localhost:5432` | Persistencia y cola. Credenciales más abajo |
 | WireMock | http://localhost:8081 | Servicio externo simulado, destino del canal `SERVICE` |
 
 Comprobar que la aplicación está lista:
@@ -93,6 +94,94 @@ Para detener todo y borrar los datos:
 
 ```bash
 docker compose down -v
+```
+
+---
+
+## Credenciales de prueba
+
+Todas las credenciales del stack son de desarrollo y tienen un valor por defecto fijado en
+`docker-compose.yml`, de modo que un clon limpio funcione sin ningún paso previo.
+
+| Qué | Valor | Variable de entorno que lo cambia |
+| --- | --- | --- |
+| Clave de la API | `local-dev-api-key-change-me` | `NOTIFICATIONS_API_KEY` |
+| PostgreSQL: usuario, contraseña y nombre de la base de datos | `notifications` | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` |
+
+**Ninguna es un secreto, y conviene ser exacto sobre por qué.** El stack publica sus puertos en
+la máquina anfitriona —`8080`, `5432` y `8081`—, así que no están aisladas: quien alcance esa
+máquina por la red puede usarlas, y encima sobre HTTP sin cifrar. Lo que las vuelve inofensivas
+no es el aislamiento sino que dan acceso a datos de prueba de un stack efímero. Un despliegue
+real las reemplaza antes de exponer nada, y su valor pasa a inyectarse desde un gestor de
+secretos.
+
+Las tres variables de PostgreSQL alimentan **al servidor y a la aplicación a la vez**, de modo
+que la configuración de ambos no puede quedar escrita con valores distintos. Para cambiar
+cualquiera, creá un archivo `.env` en la raíz del repositorio antes de levantar el stack
+—Compose lo lee solo, y el mecanismo es idéntico en `cmd`, PowerShell o un intérprete POSIX—:
+
+```
+NOTIFICATIONS_API_KEY=otra-clave
+POSTGRES_PASSWORD=otra-contraseña
+```
+
+El archivo está en `.gitignore`, así que no puede terminar publicado por accidente.
+
+> **Sobre las tres variables de PostgreSQL:** lo que no puede desalinearse es la configuración,
+> pero el servidor solo las lee **al inicializar su volumen de datos**, la primera vez que se
+> levanta el stack. En un checkout que ya arrancó alguna vez, el servidor sigue con lo que
+> guardó entonces aunque los dos servicios estén configurados igual. Cambiar `POSTGRES_USER` o
+> `POSTGRES_PASSWORD` hace fallar el arranque de la aplicación con la credencial rechazada;
+> cambiar `POSTGRES_DB` lo hace fallar contra una base de datos que no existe. Para que tomen
+> efecto hay que descartar el volumen con `docker compose down -v`. La clave de la API no tiene
+> ese problema: la aplicación la lee en cada arranque.
+
+### Cómo se presenta la clave
+
+En la cabecera `Authorization`, con el esquema `ApiKey`:
+
+```
+Authorization: ApiKey local-dev-api-key-change-me
+```
+
+El nombre del esquema no distingue mayúsculas, como exige RFC 9110. La clave no se acepta por
+la cadena de consulta a propósito: ahí quedaría escrita en los registros de acceso de
+cualquier proxy intermedio y en el historial del cliente.
+
+Toda ruta exige la credencial salvo `/actuator/health` y sus sondas. Sin ella:
+
+```bash
+curl -i http://localhost:8080/actuator/metrics
+```
+
+```
+HTTP/1.1 401
+WWW-Authenticate: ApiKey realm="notification-service"
+Content-Type: application/problem+json
+
+{"type":"about:blank","title":"Unauthorized","status":401,"detail":"A valid credential using the ApiKey scheme is required in the Authorization header"}
+```
+
+La respuesta es la misma ante una credencial ausente y ante una equivocada, a propósito:
+distinguirlas le confirmaría a quien está probando claves que la cabecera y el esquema ya eran
+correctos.
+
+Con la credencial, la misma petición responde `200`:
+
+```bash
+curl -i -H "Authorization: ApiKey local-dev-api-key-change-me" http://localhost:8080/actuator/metrics
+```
+
+El sondeo de salud queda abierto porque lo consulta el healthcheck del contenedor, que no
+tiene credenciales. Presentarla sobre ese mismo endpoint amplía la respuesta al detalle de
+cada componente:
+
+```bash
+curl http://localhost:8080/actuator/health
+# {"status":"UP","groups":["liveness","readiness"]}
+
+curl -H "Authorization: ApiKey local-dev-api-key-change-me" http://localhost:8080/actuator/health
+# {"status":"UP","groups":[...],"components":{"db":{...},"diskSpace":{...}, ...}}
 ```
 
 ---
@@ -180,7 +269,7 @@ Salida esperada:
 ```
 [INFO] Results:
 [INFO]
-[INFO] Tests run: 95, Failures: 0, Errors: 0, Skipped: 0
+[INFO] Tests run: 130, Failures: 0, Errors: 0, Skipped: 0
 [INFO] BUILD SUCCESS
 ```
 
@@ -285,6 +374,76 @@ porque el outbox ya cumple ese rol, ni mapa de contextos, porque hay un único c
 modelo de dominio y el de persistencia. En un servicio con un único adaptador de salida
 sería sobrecosto injustificado. Aquí se paga con varios canales intercambiables y dos
 puntos de entrada.
+
+### Autenticación por clave de API
+
+**El problema.** El endpoint de creación escribe en la base de datos y genera trabajo
+asíncrono, de modo que no puede quedar abierto. Hay que elegir un mecanismo, y el criterio no
+es cuál es más seguro en abstracto sino **quién es el llamador y qué tiene que transportar la
+credencial**. Aquí el llamador es otro servicio: no hay persona, ni consentimiento, ni un
+tercero actuando en nombre de nadie.
+
+**La decisión.** Una clave compartida que viaja en la cabecera `Authorization` con el esquema
+`ApiKey`, verificada por un filtro dentro de la cadena de Spring Security. El filtro se limita
+a autenticar; **qué puede alcanzar cada petición lo decide la cadena**, en un único lugar, de
+forma que la política de acceso se lee de una sola mirada en vez de estar repartida.
+
+Esa política es denegar por defecto: todo exige la clave excepto `/actuator/health` y sus
+sondas, que quedan abiertas porque el healthcheck del contenedor las consulta sin
+credenciales. Es más estricto de lo que hoy se necesita, y a propósito: un endpoint que se
+añada mañana nace protegido sin que nadie tenga que acordarse de protegerlo.
+
+Viaja en `Authorization` y no en una cabecera propia como `X-API-Key` por dos motivos. El
+primero es que `Authorization` es el lugar que la especificación reserva para credenciales, lo
+que permite acompañar el `401` con su `WWW-Authenticate: ApiKey realm="notification-service"`;
+una cabecera propia no tiene ningún desafío que anunciar, de modo que el rechazo quedaría
+incompleto frente a RFC 9110. El segundo es que los proxies, los recolectores de registros y
+los agentes de observabilidad enmascaran `Authorization` por convención, mientras que una
+cabecera propia solo se enmascara si alguien se acuerda de configurarlo. En un servicio que
+emite registros estructurados, esa diferencia es la que separa una credencial protegida de una
+credencial escrita en el registro.
+
+El esquema se llama `ApiKey` y no `Bearer` porque este último está definido para los tokens de
+acceso de OAuth 2.0, que es justamente lo que se descarta más abajo; nombrarlo así abriría una
+ambigüedad innecesaria. `ApiKey` no figura en el registro de IANA —el nombre del esquema es un
+token extensible, así que es válido igualmente— y describe exactamente lo que se presenta.
+
+La comparación se hace en tiempo constante. Un `equals` entre cadenas termina en cuanto
+encuentra el primer carácter distinto, de modo que el tiempo de respuesta revela cuántos
+caracteres iniciales acertó quien la envió.
+
+**Alternativas descartadas.**
+
+- **OAuth2.** Es un protocolo de delegación: existe para que una persona autorice a una
+  aplicación de terceros a actuar en su nombre sin entregarle su contraseña. Aquí no hay
+  dueño de los recursos ni hay tercero. Su flujo `client_credentials` sí cubre el caso de
+  máquina a máquina, pero equivale a una clave de API con pasos intermedios salvo que hagan
+  falta credenciales de vida corta, permisos diferenciados por cliente o revocación
+  centralizada entre varios servicios. Con un solo llamador y una sola API, el servidor de
+  autorización aporta todo el coste y ninguna de esas tres cosas: un contenedor más, y un
+  *realm* y un cliente que sembrar antes de que el sistema responda, lo que incumple el
+  requisito de que `docker compose up` baste en una máquina sin configuración previa.
+- **JWT.** No es un mecanismo de autenticación sino un formato para transportar
+  afirmaciones firmadas. Su ventaja —que quien recibe la petición pueda validarla sin
+  consultar a quien la emitió— se cobra con varios servicios y un proveedor de identidad
+  común. Con un único servicio se estarían firmando afirmaciones que él mismo emite y él
+  mismo lee. Y añade un coste propio: un token es válido hasta que expira, así que revocar
+  uno comprometido antes de tiempo exige mantener una lista de rechazados, es decir
+  exactamente el estado compartido que el formato venía a eliminar.
+
+**Qué cuesta.** La clave no caduca ni rota sin un redespliegue. Es una sola para todos los
+llamadores, de modo que no se puede atribuir una petición a uno concreto ni retirarle el
+acceso sin afectar a los demás. Y es una credencial *al portador*: quien la posee queda
+autenticado, por lo que su protección en tránsito depende por completo de TLS, que este stack
+local no ofrece.
+
+**Qué haría cambiar la decisión.** Varios llamadores que necesiten revocación independiente
+llevarían a una clave por cliente, almacenada como *hash* en la base de datos. Terceros
+actuando en nombre de usuarios llevarían a OAuth2. Varios servicios compartiendo una misma
+identidad, a JWT con un emisor común. En los tres casos el cambio queda contenido en la
+cadena de seguridad: de ahí hacia adentro nadie lee la credencial. Y en el caso de JWT el
+cliente tampoco cambia dónde la coloca: la misma cabecera `Authorization`, con el esquema
+`Bearer` en lugar de `ApiKey`.
 
 ### Canales de despacho: `LOG` y `SERVICE`
 
@@ -444,6 +603,23 @@ apuntar a una dirección interna.
 Se acepta como limitación deliberada porque el único destino previsto forma parte del propio
 stack, y la autenticación restringe quién puede enviar notificaciones.
 
+### Un llamador sin credencial no distingue un error de una ruta inexistente
+
+Cuando una petición termina en error, el contenedor la redespacha internamente a `/error`, y
+esa ruta queda denegada como todas las demás. La consecuencia visible: `POST /actuator/health`
+—un método no admitido sobre la única ruta abierta— responde `401` en lugar del `405` que
+correspondería. Con credencial válida sí devuelve `405` con su cabecera `Allow: GET`.
+
+Es deliberado. Abrir el redespacho de error devolvería el estado correcto, y de paso le
+entregaría a cualquiera un mapa del servicio: una ruta inexistente pasaría a responder `404`
+mientras una ruta real y protegida sigue en `401`, y bastaría con recorrer un diccionario para
+saber qué existe. Hoy las dos responden `401` y no se pueden separar.
+
+Se eligió el silencio. El precio es un código de estado impreciso sobre un endpoint público
+invocado con el método equivocado, cosa que ningún cliente del sistema hace —el healthcheck
+del contenedor usa `GET`—; el beneficio es que la superficie no se puede cartografiar sin
+credencial. Con un catálogo de rutas públicas más grande, la decisión se revisaría.
+
 ### El canal `EMAIL` no está implementado
 
 Se eligieron `LOG` y `SERVICE`, y el motivo está explicado más arriba. Incorporar `EMAIL`
@@ -475,7 +651,7 @@ el trabajo del despachador, pero eso mitiga el problema sin resolverlo.
 | Modelo de dominio y máquina de estados | Completo |
 | API REST de creación y consulta | Pendiente |
 | Idempotencia de entrada (`Idempotency-Key`) y de salida (`X-Notification-Id`) | Pendiente |
-| Autenticación | Pendiente |
+| Autenticación | Completo |
 | Worker de despacho y canales | Pendiente |
 | Tests unitarios del dominio | Completo |
 | Tests de integración | Pendiente |

@@ -32,6 +32,7 @@ class NotificationsPropertiesTest {
 
     private static final String VALID_INSTANCE_ID = "notifications.instance-id=notification-service-1";
     private static final String VALID_API_KEY = "notifications.security.api-key=a-development-key";
+    private static final String VALID_MAX_ATTEMPTS = "notifications.retry.max-attempts=3";
 
     private final ApplicationContextRunner runner =
             new ApplicationContextRunner().withUserConfiguration(BindProperties.class);
@@ -39,47 +40,72 @@ class NotificationsPropertiesTest {
     @Test
     @DisplayName("binds a complete configuration onto the typed properties")
     void bindsCompleteConfiguration() {
-        runner.withPropertyValues(VALID_INSTANCE_ID, VALID_API_KEY).run(context -> {
-            assertThat(context).hasNotFailed();
+        runner.withPropertyValues(VALID_INSTANCE_ID, VALID_API_KEY, VALID_MAX_ATTEMPTS)
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
 
-            NotificationsProperties properties = context.getBean(NotificationsProperties.class);
-            assertThat(properties.instanceId()).isEqualTo("notification-service-1");
-            assertThat(properties.security().apiKey()).isEqualTo("a-development-key");
-        });
+                    NotificationsProperties properties =
+                            context.getBean(NotificationsProperties.class);
+                    assertThat(properties.instanceId()).isEqualTo("notification-service-1");
+                    assertThat(properties.security().apiKey()).isEqualTo("a-development-key");
+                    assertThat(properties.retry().maxAttempts()).isEqualTo(3);
+                });
     }
 
     @Test
     @DisplayName("accepts an instance id exactly at the column width")
     void acceptsInstanceIdAtColumnWidth() {
-        runner.withPropertyValues(instanceIdOf(CLAIMED_BY_WIDTH), VALID_API_KEY)
+        runner.withPropertyValues(instanceIdOf(CLAIMED_BY_WIDTH), VALID_API_KEY, VALID_MAX_ATTEMPTS)
                 .run(context -> assertThat(context).hasNotFailed());
     }
 
     @Test
     @DisplayName("refuses to start when the instance id exceeds the column width")
     void rejectsInstanceIdOverColumnWidth() {
-        runner.withPropertyValues(instanceIdOf(CLAIMED_BY_WIDTH + 1), VALID_API_KEY)
+        runner.withPropertyValues(instanceIdOf(CLAIMED_BY_WIDTH + 1), VALID_API_KEY,
+                        VALID_MAX_ATTEMPTS)
                 .run(failsNaming("instanceId", "size must be between"));
     }
 
     @Test
     @DisplayName("refuses to start when the instance id is blank")
     void rejectsBlankInstanceId() {
-        runner.withPropertyValues("notifications.instance-id=   ", VALID_API_KEY)
+        runner.withPropertyValues("notifications.instance-id=   ", VALID_API_KEY, VALID_MAX_ATTEMPTS)
                 .run(failsNaming("instanceId", "must not be blank"));
     }
 
     @Test
     @DisplayName("refuses to start when the api key is blank")
     void rejectsBlankApiKey() {
-        runner.withPropertyValues(VALID_INSTANCE_ID, "notifications.security.api-key=")
+        runner.withPropertyValues(VALID_INSTANCE_ID, "notifications.security.api-key=",
+                        VALID_MAX_ATTEMPTS)
                 .run(failsNaming("apiKey", "must not be blank"));
     }
 
     @Test
     @DisplayName("refuses to start when the security block is absent altogether")
     void rejectsMissingSecurityBlock() {
-        runner.withPropertyValues(VALID_INSTANCE_ID).run(failsNaming("security", "must not be null"));
+        runner.withPropertyValues(VALID_INSTANCE_ID, VALID_MAX_ATTEMPTS)
+                .run(failsNaming("security", "must not be null"));
+    }
+
+    @Test
+    @DisplayName("refuses to start on a delivery budget below one")
+    void rejectsABudgetBelowOne() {
+        // A budget of zero would create notifications that can never be attempted: they would sit
+        // PENDING forever, accepted at the endpoint and never delivered, with nothing in the logs
+        // to say why. The same rule is a check constraint on the column and a guard in the
+        // aggregate; this is the only one of the three that fires before any traffic arrives.
+        runner.withPropertyValues(VALID_INSTANCE_ID, VALID_API_KEY,
+                        "notifications.retry.max-attempts=0")
+                .run(failsNaming("maxAttempts", "must be greater than or equal to 1"));
+    }
+
+    @Test
+    @DisplayName("refuses to start when the retry block is absent altogether")
+    void rejectsMissingRetryBlock() {
+        runner.withPropertyValues(VALID_INSTANCE_ID, VALID_API_KEY)
+                .run(failsNaming("retry", "must not be null"));
     }
 
     private static String instanceIdOf(int length) {

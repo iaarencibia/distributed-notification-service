@@ -21,6 +21,12 @@
     <properties>
         <java.version>21</java.version>
         <wiremock.version>3.13.2</wiremock.version>
+        <!--
+          Lets `-DskipUnitTests` mean what it says when only the integration tests are wanted.
+          Maven's own switch for this is maven.test.skip.exec, which is neither obvious nor
+          something a README should ask anyone to remember.
+        -->
+        <skipUnitTests>false</skipUnitTests>
     </properties>
 
     <dependencies>
@@ -145,6 +151,7 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
+                    <skip>${skipUnitTests}</skip>
                     <excludes>
                         <exclude>**/*IT.java</exclude>
                     </excludes>

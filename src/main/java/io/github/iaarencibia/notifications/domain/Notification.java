@@ -115,6 +115,87 @@ public final class Notification {
     }
 
     /**
+     * Rebuilds a notification that already exists, with the history it has accumulated.
+     *
+     * <p>It is not {@link #submit} with more arguments. That one asks whether a birth is legal
+     * and refuses anything past PENDING with no attempts; this one asks whether a state is one a
+     * notification can be found in, and has to accept exactly those.
+     *
+     * <p>What it refuses is what the schema refuses, and no more. A rule stricter here than the
+     * {@code CHECK} constraints would make a row that legally exists impossible to read back.
+     *
+     * <p>The parameters follow the column order of the {@code notification} table, so that the
+     * mapper reads as a transcription and a crossed pair shows up side by side.
+     *
+     * @param id             identity of the notification
+     * @param payload        what the client asked to be sent, and to whom
+     * @param status         the lifecycle state the row is in
+     * @param attempts       deliveries already recorded, never above {@code maxAttempts}
+     * @param maxAttempts    the budget this notification was created with
+     * @param nextAttemptAt  when the claim query may take it again
+     * @param lastError      why the most recent attempt failed, or {@code null}
+     * @param claimedAt      when the current owner took it, or {@code null}
+     * @param claimedBy      the instance that owns it, or {@code null}
+     * @param correlationId  groups this notification with the rest of its operation
+     * @param idempotencyKey the client's own key, or {@code null}
+     * @param createdAt      when it entered the system
+     * @param updatedAt      when the row was last written
+     * @param sentAt         when it was delivered, or {@code null}
+     * @return the notification as it stands
+     */
+    public static Notification rehydrate(UUID id, NotificationPayload payload,
+            NotificationStatus status, int attempts, int maxAttempts, Instant nextAttemptAt,
+            String lastError, Instant claimedAt, String claimedBy, CorrelationId correlationId,
+            String idempotencyKey, Instant createdAt, Instant updatedAt, Instant sentAt) {
+        Objects.requireNonNull(id, "id must not be null");
+        Objects.requireNonNull(payload, "payload must not be null");
+        Objects.requireNonNull(status, "status must not be null");
+        Objects.requireNonNull(nextAttemptAt, "nextAttemptAt must not be null");
+        Objects.requireNonNull(correlationId, "correlationId must not be null");
+        Objects.requireNonNull(createdAt, "createdAt must not be null");
+        Objects.requireNonNull(updatedAt, "updatedAt must not be null");
+
+        // Mirrors ck_notification_max_attempts and ck_notification_attempts.
+        if (maxAttempts < 1) {
+            throw new IllegalArgumentException("maxAttempts must be at least 1");
+        }
+        if (attempts < 0 || attempts > maxAttempts) {
+            throw new IllegalArgumentException(
+                    "attempts must be between 0 and " + maxAttempts + ", was " + attempts);
+        }
+        // Mirrors ck_notification_claim_consistency. A claimed row with no owner is not a
+        // notification with an odd history: it is corrupt data, and the reaper could never
+        // trace it back to the instance that abandoned it.
+        if (status == NotificationStatus.DISPATCHING && (claimedAt == null || claimedBy == null)) {
+            throw new IllegalArgumentException("a DISPATCHING notification must name its owner");
+        }
+
+        return new Notification(id, payload, status, attempts, maxAttempts, nextAttemptAt,
+                lastError, claimedAt, claimedBy, correlationId, idempotencyKey, createdAt,
+                updatedAt, sentAt);
+    }
+
+    private Notification(UUID id, NotificationPayload payload, NotificationStatus status,
+            int attempts, int maxAttempts, Instant nextAttemptAt, String lastError,
+            Instant claimedAt, String claimedBy, CorrelationId correlationId,
+            String idempotencyKey, Instant createdAt, Instant updatedAt, Instant sentAt) {
+        this.id = id;
+        this.payload = payload;
+        this.status = status;
+        this.attempts = attempts;
+        this.maxAttempts = maxAttempts;
+        this.nextAttemptAt = nextAttemptAt;
+        this.lastError = lastError;
+        this.claimedAt = claimedAt;
+        this.claimedBy = claimedBy;
+        this.correlationId = correlationId;
+        this.idempotencyKey = idempotencyKey;
+        this.createdAt = createdAt;
+        this.updatedAt = updatedAt;
+        this.sentAt = sentAt;
+    }
+
+    /**
      * Takes ownership of the notification for dispatch.
      *
      * <p>

@@ -501,4 +501,88 @@ class NotificationTest {
                     new DispatchOutcome.Success(200), T0, T0.plusMillis(39), null));
         }
     }
+
+    @Nested
+    @DisplayName("rehydration")
+    class Rehydration {
+
+        private static final Instant UPDATED_AT = T0.plusSeconds(60);
+        private static final Instant NEXT_ATTEMPT_AT = T0.plusSeconds(300);
+
+        /** Varies only the lifecycle state, so what each guard rejects is unambiguous. */
+        private Notification aRowIn(NotificationStatus status, int attempts, int maxAttempts,
+                Instant claimedAt, String claimedBy) {
+            return Notification.rehydrate(ID, payload(), status, attempts, maxAttempts,
+                    NEXT_ATTEMPT_AT, "Service Unavailable", claimedAt, claimedBy, CORRELATION_ID,
+                    "idem-key-1", T0, UPDATED_AT, null);
+        }
+
+        /** Varies only the arguments that have a NOT NULL column behind them. */
+        private Notification aRowWith(UUID id, NotificationPayload payload,
+                NotificationStatus status, Instant nextAttemptAt, CorrelationId correlationId,
+                Instant createdAt, Instant updatedAt) {
+            return Notification.rehydrate(id, payload, status, 1, MAX_ATTEMPTS, nextAttemptAt,
+                    null, null, null, correlationId, "idem-key-1", createdAt, updatedAt, null);
+        }
+
+        @Test
+        @DisplayName("requires an attempt budget of at least one")
+        void requiresABudget() {
+            // Mirrors ck_notification_max_attempts.
+            assertThatIllegalArgumentException().isThrownBy(
+                    () -> aRowIn(NotificationStatus.PENDING, 0, 0, null, null));
+        }
+
+        @Test
+        @DisplayName("rejects an attempt count outside the budget")
+        void rejectsAttemptsOutsideTheBudget() {
+            // Mirrors ck_notification_attempts: 0 <= attempts <= max_attempts. Both ends, because
+            // a row past its budget is as impossible as one with a negative count.
+            assertThatIllegalArgumentException().isThrownBy(
+                    () -> aRowIn(NotificationStatus.PENDING, -1, MAX_ATTEMPTS, null, null));
+            assertThatIllegalArgumentException().isThrownBy(
+                    () -> aRowIn(NotificationStatus.PENDING, MAX_ATTEMPTS + 1, MAX_ATTEMPTS,
+                            null, null));
+        }
+
+        @Test
+        @DisplayName("rejects a DISPATCHING notification that does not name its owner")
+        void rejectsAClaimWithoutAnOwner() {
+            // Mirrors ck_notification_claim_consistency. Either half missing leaves the reaper
+            // unable to trace the row back to the instance that abandoned it.
+            assertThatIllegalArgumentException().isThrownBy(
+                    () -> aRowIn(NotificationStatus.DISPATCHING, 1, MAX_ATTEMPTS, null, INSTANCE));
+            assertThatIllegalArgumentException().isThrownBy(
+                    () -> aRowIn(NotificationStatus.DISPATCHING, 1, MAX_ATTEMPTS,
+                            T0.plusSeconds(30), null));
+        }
+
+        @Test
+        @DisplayName("requires the identity, payload, status, schedule, trace and timestamps")
+        void requiresMandatoryArguments() {
+            // Every one of these has a NOT NULL column behind it, so a null here never comes from
+            // the data -- it comes from the mapper, which is exactly what this catches.
+            assertThatNullPointerException().isThrownBy(() -> aRowWith(
+                    null, payload(), NotificationStatus.PENDING, NEXT_ATTEMPT_AT,
+                    CORRELATION_ID, T0, UPDATED_AT));
+            assertThatNullPointerException().isThrownBy(() -> aRowWith(
+                    ID, null, NotificationStatus.PENDING, NEXT_ATTEMPT_AT,
+                    CORRELATION_ID, T0, UPDATED_AT));
+            assertThatNullPointerException().isThrownBy(() -> aRowWith(
+                    ID, payload(), null, NEXT_ATTEMPT_AT,
+                    CORRELATION_ID, T0, UPDATED_AT));
+            assertThatNullPointerException().isThrownBy(() -> aRowWith(
+                    ID, payload(), NotificationStatus.PENDING, null,
+                    CORRELATION_ID, T0, UPDATED_AT));
+            assertThatNullPointerException().isThrownBy(() -> aRowWith(
+                    ID, payload(), NotificationStatus.PENDING, NEXT_ATTEMPT_AT,
+                    null, T0, UPDATED_AT));
+            assertThatNullPointerException().isThrownBy(() -> aRowWith(
+                    ID, payload(), NotificationStatus.PENDING, NEXT_ATTEMPT_AT,
+                    CORRELATION_ID, null, UPDATED_AT));
+            assertThatNullPointerException().isThrownBy(() -> aRowWith(
+                    ID, payload(), NotificationStatus.PENDING, NEXT_ATTEMPT_AT,
+                    CORRELATION_ID, T0, null));
+        }
+    }
 }

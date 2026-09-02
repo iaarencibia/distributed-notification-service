@@ -1,5 +1,6 @@
 package io.github.iaarencibia.notifications.config;
 
+import io.github.iaarencibia.notifications.IntegrationTestSupport;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -24,17 +25,13 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * Exercises the production filter chain: the real filter, the real entry point and the real
  * actuator endpoints.
  *
- * <p>Why persistence is switched off is explained on {@link NoPersistence}.
- *
  * <p>{@code /actuator/metrics} stands in for a protected route because no business endpoint
  * exists yet. It is exposed, it is not on the permitted list, and it exists — so a {@code 200}
  * proves the request cleared the chain, with nothing inferred about unmapped paths.
  */
-@SpringBootTest(properties = {NoPersistence.API_KEY_PROPERTY, NoPersistence.EXCLUDE})
+@SpringBootTest(properties = IntegrationTestSupport.API_KEY_PROPERTY)
 @AutoConfigureMockMvc
-class ApiKeySecurityTest {
-
-    private static final String API_KEY = NoPersistence.API_KEY;
+class ApiKeySecurityIT extends IntegrationTestSupport {
 
     private static final String CREDENTIAL = "ApiKey " + API_KEY;
     private static final String CHALLENGE = "ApiKey realm=\"notification-service\"";

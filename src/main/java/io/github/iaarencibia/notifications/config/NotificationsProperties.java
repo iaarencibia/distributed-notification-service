@@ -2,6 +2,7 @@ package io.github.iaarencibia.notifications.config;
 
 import io.github.iaarencibia.notifications.domain.Notification;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
@@ -21,16 +22,29 @@ import org.springframework.validation.annotation.Validated;
  *                   own, so that configuration and domain cannot disagree about the width of
  *                   that column
  * @param security   the credentials the intake endpoint requires
+ * @param retry      the delivery budget a notification is created with
  */
 @ConfigurationProperties(prefix = "notifications")
 @Validated
 public record NotificationsProperties(
         @NotBlank @Size(max = Notification.MAX_CLAIMED_BY_LENGTH) String instanceId,
-        @NotNull @Valid Security security) {
+        @NotNull @Valid Security security,
+        @NotNull @Valid Retry retry) {
 
     /**
      * @param apiKey the shared key a caller presents to reach a protected endpoint
      */
     public record Security(@NotBlank String apiKey) {
+    }
+
+    /**
+     * Only the budget is bound. The backoff, the multiplier, the ceiling and the jitter are read
+     * by the retry policy, which the dispatcher wires in, and they join this record then.
+     *
+     * @param maxAttempts how many deliveries a notification is given. Stamped on each row as it
+     *                    is created, so a later change of configuration leaves notifications
+     *                    already in flight with the budget they were promised
+     */
+    public record Retry(@Min(1) int maxAttempts) {
     }
 }

@@ -12,6 +12,7 @@ con reintentos y registro de fallos.
 - [Precondiciones](#precondiciones)
 - [Cómo levantar el proyecto](#cómo-levantar-el-proyecto)
 - [Credenciales de prueba](#credenciales-de-prueba)
+- [API](#api)
 - [Cómo inspeccionar el estado](#cómo-inspeccionar-el-estado)
 - [Cómo correr los tests](#cómo-correr-los-tests)
 - [Decisiones de diseño](#decisiones-de-diseño)
@@ -32,6 +33,45 @@ Una sola herramienta:
 **No hace falta instalar Java ni Maven.** El proyecto se compila dentro de su propia etapa
 de build en el `Dockerfile`, de modo que una máquina sin configuración previa puede
 levantarlo igual.
+
+### Sobre la memoria asignada a Docker
+
+El proyecto se desarrolló y se verificó con **8 GB** asignados a Docker. Levantar el stack pide
+poco; la parte pesada es la suite de integración, que además del contenedor de Maven y de la JVM
+que corre las pruebas arranca un PostgreSQL propio con Testcontainers.
+
+No está medido cuál es el mínimo, así que no se declara uno. Lo que sí se observó: 
+con Docker limitado a **1 GB**, los tests de integración pueden fallar **todos** con un
+error que nombra `org.mockito.plugins.MockMaker` y no menciona la memoria por ningún lado. Es
+fácil leerlo como un defecto del proyecto, y no lo es: es la JVM bifurcada quedándose sin espacio
+para instrumentar clases.
+
+### Sobre el intérprete de comandos
+
+Los ejemplos de este documento están escritos para un **shell POSIX**: Linux, macOS, o en
+Windows Git Bash o WSL. Ahí se copian y pegan sin tocar nada.
+
+En **PowerShell no funcionan tal cual**, por dos motivos distintos.
+
+El primero es fácil: **`curl` en PowerShell no es curl.** Es un alias de `Invoke-WebRequest`, un
+cmdlet con otros parámetros, así que `-i`, `-X` y `-H` no existen para él. Se resuelve escribiendo
+`curl.exe`, y usando `` ` `` en lugar de `\` para continuar una línea.
+
+El segundo solo aparece cuando hay un cuerpo JSON. PowerShell 5.1 vuelve a analizar los
+argumentos antes de entregárselos a un ejecutable nativo, y **corta el argumento en el primer
+espacio que hay dentro de una comilla escapada**. Medido con
+`curl --trace-ascii` sobre el ejemplo de la sección *API*: al servidor llegaron **14 bytes**,
+`{"subject":"Tu`, y el resto del JSON se perdió por el camino. La respuesta es un `400` que
+parece del servicio y es del intérprete.
+
+Por eso el único comando de este README con cuerpo JSON —el `POST` de la sección *API*— está
+escrito también con **`Invoke-RestMethod`**, que recibe el cuerpo como una variable y no pasa por
+ese análisis. Quien prefiera seguir con curl puede anteponer el token `--%`, que apaga el
+analizador de PowerShell, a cambio de escribir todo en una sola línea.
+
+En **`cmd`** la continuación de línea es `^` y no `\` —con `\` solo se ejecuta el primer renglón,
+y la petición sale sin sus cabeceras—, y las comillas simples no se quitan, así que el cuerpo va
+entre comillas dobles con las internas escapadas.
 
 ### Versiones que usa el proyecto
 
@@ -85,10 +125,6 @@ La respuesta esperada es:
 ```json
 {"status":"UP"}
 ```
-
-> **Si usás PowerShell**, escribí `curl.exe` en lugar de `curl`: en esa shell `curl` es un
-> alias de `Invoke-WebRequest` y rechaza estos parámetros. En Bash, WSL, Git Bash y CMD los
-> ejemplos funcionan tal cual.
 
 Para detener todo y borrar los datos:
 
@@ -186,6 +222,169 @@ curl -H "Authorization: ApiKey local-dev-api-key-change-me" http://localhost:808
 
 ---
 
+## API
+
+### `POST /api/v1/notifications`
+
+Acepta una notificación para ser entregada. Responde **`202 Accepted`**, no `201 Created` —y no
+porque no se cree nada, la fila se crea—: `201` es una respuesta *sobre la creación*, y lo que el
+llamador necesita saber es que la entrega que pidió todavía no ocurrió.
+
+**Cabeceras**
+
+| Cabecera | | |
+| --- | --- | --- |
+| `Authorization` | obligatoria | `ApiKey <clave>` |
+| `Content-Type` | obligatoria | `application/json` |
+| `Idempotency-Key` | opcional | Hace la petición segura de repetir. Muy recomendada — ver abajo |
+| `X-Correlation-Id` | opcional | Agrupa varias notificaciones de una misma operación. Máx. 128 caracteres, y solo letras, dígitos y `. _ : -`. Si no viene, el servicio genera un UUID |
+
+**Cuerpo**
+
+| Campo | Tipo | | |
+| --- | --- | --- | --- |
+| `recipient` | `string` | obligatorio | Destino. Una URL para el canal `SERVICE`. Máx. 2048 |
+| `channel` | `enum` | obligatorio | `LOG` · `SERVICE` · `EMAIL` |
+| `subject` | `string` | obligatorio | Máx. 512 |
+| `body` | `string` | obligatorio | Máx. 16384. Puede ir vacío: un aviso de solo asunto es legítimo |
+| `priority` | `enum` | obligatorio | `LOW` · `MEDIUM` · `HIGH` |
+| `metadata` | `object` | opcional | Pares de texto, transportados sin tocar. Máx. 32 pares, con la clave en 128 y el valor en 2048 |
+
+Los cuatro límites de texto se cuentan en **caracteres**, no en bytes ni en unidades UTF-16: un
+emoji ocupa uno. Un asunto de 512 emojis entra, aunque `String.length()` en Java diga 1024.
+
+```bash
+curl -i -X POST http://localhost:8080/api/v1/notifications \
+  -H "Authorization: ApiKey local-dev-api-key-change-me" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: pedido-4471-comprador" \
+  -H "X-Correlation-Id: order-4471" \
+  -d '{
+        "recipient": "http://wiremock:8080/hook/ok",
+        "channel": "SERVICE",
+        "subject": "Tu pedido fue enviado",
+        "body": "Va en camino.",
+        "priority": "HIGH",
+        "metadata": {"orderId": "4471"}
+      }'
+```
+
+La respuesta esperada es:
+
+```
+HTTP/1.1 202
+Content-Type: application/json
+
+{"id":"3f2a1c40-9b7e-4d21-8a55-1c0e6f2b91d4"}
+```
+
+La respuesta lleva **solo el `id`**, y alcanza: un cliente que no mandó `X-Correlation-Id`
+correlaciona por ese identificador, que es único de esta notificación. La cabecera sirve para
+agrupar **varias** notificaciones de una misma operación, y eso solo lo sabe quien la envía.
+
+El mismo envío en **PowerShell**. No es `curl` con otra sintaxis: es el cmdlet nativo, y el
+motivo está en *[Sobre el intérprete de comandos](#sobre-el-intérprete-de-comandos)*.
+
+```powershell
+$body = '{"recipient":"http://wiremock:8080/hook/ok","channel":"SERVICE","subject":"Tu pedido fue enviado","body":"Va en camino.","priority":"HIGH","metadata":{"orderId":"4471"}}'
+
+$headers = @{
+  "Authorization"    = "ApiKey local-dev-api-key-change-me"
+  "Idempotency-Key"  = "pedido-4471-comprador"
+  "X-Correlation-Id" = "order-4471"
+}
+
+Invoke-RestMethod -Uri http://localhost:8080/api/v1/notifications -Method Post `
+  -ContentType "application/json" -Headers $headers -Body $body
+```
+
+> **Hay dos direcciones distintas en los dos ejemplos, y es a propósito.** `localhost:8080` es el
+> servicio visto desde tu máquina, que es la que ejecuta el comando. `wiremock:8080` **tu máquina
+> no lo resuelve, y no hace falta que lo resuelva**: ese valor no lo usa el cliente, se guarda en
+> la fila y lo usa después el contenedor de la aplicación al despachar, desde dentro de la red de
+> Docker.
+> Los destinos disponibles y cómo invocarlos a mano están en *[Destinos simulados de
+> WireMock](#destinos-simulados-de-wiremock)*.
+
+### Por qué conviene mandar `Idempotency-Key`
+
+Si la respuesta se pierde en el camino —un timeout, una conexión cortada—, el cliente no sabe
+si la notificación entró. Sin la cabecera, reintentar crea una segunda y el destinatario recibe
+el aviso dos veces. Con ella, el reintento **devuelve la misma respuesta y el mismo `id`**, y no
+se crea nada.
+
+La clave la elige el cliente, y tiene que identificar el envío lógico, no la petición: la misma
+clave para el mismo reintento, una distinta para cada notificación real. Máx. 255 caracteres.
+
+Es distinta de `X-Correlation-Id`, y las dos tiran para lados opuestos. La clave de idempotencia
+**no puede repetirse**; el identificador de correlación **debe poder repetirse**, porque las tres
+notificaciones de un mismo pedido lo comparten. Mandar `order-4471` como clave de idempotencia en
+las tres haría que solo entrara la primera.
+
+### Errores
+
+Todos los errores se devuelven como *problem details* de RFC 9457, con
+`Content-Type: application/problem+json`.
+
+| Código | Cuándo |
+| --- | --- |
+| `400` | Un campo del cuerpo falta o no es válido · un canal o una prioridad que no existen · `X-Correlation-Id` fuera del juego de caracteres permitido · `Idempotency-Key` en blanco o de más de 255 caracteres |
+| `401` | Sin credencial, o con una que no coincide |
+| `405` · `415` | Método o tipo de contenido equivocados |
+
+El cuerpo de un `400` nombra **cada campo y qué le falta**, que es lo que hace falta para
+corregir el cliente sin adivinar:
+
+```bash
+curl -i -X POST http://localhost:8080/api/v1/notifications \
+  -H "Authorization: ApiKey local-dev-api-key-change-me" \
+  -H "Content-Type: application/json" \
+  -d '{"recipient": "  ", "channel": "SERVICE"}'
+```
+
+```
+HTTP/1.1 400
+Content-Type: application/problem+json
+
+{"type":"about:blank","title":"Bad Request","status":400,
+ "detail":"One or more fields of the request body are invalid",
+ "instance":"/api/v1/notifications",
+ "errors":{"body":"must be present, though it may be empty",
+           "priority":"must be one of LOW, MEDIUM, HIGH",
+           "recipient":"must not be blank",
+           "subject":"must not be blank"}}
+```
+
+Las **cabeceras** se responden igual: se revisan las dos antes de rechazar, así que un llamador
+que se equivocó en `X-Correlation-Id` y en `Idempotency-Key` se entera de las dos cosas en la
+misma respuesta, y cada una bajo el nombre exacto de su cabecera HTTP, tal como la escribió.
+
+```
+{"type":"about:blank","title":"Bad Request","status":400,
+ "detail":"One or more request headers are invalid",
+ "instance":"/api/v1/notifications",
+ "errors":{"Idempotency-Key":"must not exceed 255 characters",
+           "X-Correlation-Id":"must be 1 to 128 characters, and may contain only letters, digits and the characters . _ : -"}}
+```
+
+**Con una excepción, y conviene saberla:** un valor que ni siquiera se puede leer —un canal o
+una prioridad que no existen— lo rechaza el deserializador **antes** de que la validación llegue
+a correr, así que ese caso se reporta solo:
+
+```
+{"type":"about:blank","title":"Bad Request","status":400,
+ "detail":"The request body could not be read as JSON",
+ "instance":"/api/v1/notifications",
+ "errors":{"channel":"must be one of LOG, SERVICE, EMAIL"}}
+```
+
+Los errores los producen **dos componentes distintos**, y no es un descuido: el `401` lo escribe
+la cadena de seguridad, que rechaza la petición antes de que llegue a ningún controlador, y el
+resto lo escribe el manejador del adaptador web. Que los dos coincidan en forma lo fija un test,
+no la buena intención.
+
+---
+
 ## Cómo inspeccionar el estado
 
 Los logs de la aplicación se emiten como JSON estructurado en formato ECS:
@@ -264,31 +463,64 @@ docker compose run --rm test
 El comando es idéntico en cualquier intérprete —`cmd`, PowerShell o un shell POSIX—, ya que
 las rutas las resuelve Compose y no el intérprete.
 
-Salida esperada:
+Salida esperada, en dos bloques:
 
 ```
-[INFO] Results:
-[INFO]
-[INFO] Tests run: 130, Failures: 0, Errors: 0, Skipped: 0
+[INFO] Tests run: 141, Failures: 0, Errors: 0, Skipped: 0     ← unitarios
+[INFO] Tests run: 46, Failures: 0, Errors: 0, Skipped: 0      ← integración
 [INFO] BUILD SUCCESS
 ```
 
 El número de tests crece a medida que avanza la implementación; lo que debe verificarse es
-que `Failures` y `Errors` sean cero.
+que `Failures` y `Errors` sean cero en los dos.
 
-Para ejecutar una única clase, los argumentos que se añaden reemplazan al comando por
-defecto del servicio:
+Entre los unitarios aparecen seis `WARN` de `ConfigurationPropertiesBindException`. Son
+esperados: hay seis pruebas que verifican que una configuración inválida **detiene el arranque**
+—un identificador de instancia más largo que su columna, uno en blanco, una clave de API en
+blanco, el bloque de seguridad ausente, un presupuesto de reintentos en cero, y el bloque de
+reintentos ausente— y para comprobarlo tienen que provocar ese fallo. El aviso es la alarma
+sonando, no un problema.
 
-```bash
-docker compose run --rm test mvn -B -ntp test -Dtest=NotificationStatusTest
-```
+### Los dos niveles
 
-Dos notas sobre el servicio `test`:
+Son dos suites con costos muy distintos, y por eso están separadas.
+
+Los **unitarios** no levantan contenedores, y salvo `NotificationsPropertiesTest` —que necesita
+un contexto de Spring para comprobar que una configuración inválida impide arrancar— tampoco
+levantan contexto. Corren en segundos
+y son los que se ejecutan cien veces mientras se trabaja. Los de **integración** arrancan la
+aplicación completa contra un PostgreSQL real que Testcontainers levanta para ellos, y prueban
+lo que solo la base de datos puede confirmar —el índice único de idempotencia, las restricciones
+del esquema, la cadena de filtros sobre un servidor de verdad—.
+
+La separación la hace el nombre de la clase: `*Test` lo ejecuta surefire, `*IT` lo ejecuta
+failsafe en una fase posterior.
+
+| Qué se quiere correr | Comando |
+| --- | --- |
+| Todo | `docker compose run --rm test` |
+| Solo los unitarios | `docker compose run --rm test mvn -B -ntp test` |
+| Solo los de integración | `docker compose run --rm test mvn -B -ntp verify -DskipUnitTests` |
+| Una clase unitaria | `docker compose run --rm test mvn -B -ntp test -Dtest=NotificationStatusTest` |
+| Una clase de integración | `docker compose run --rm test mvn -B -ntp verify -DskipUnitTests "-Dit.test=ApiKeySecurityIT"` |
+
+Los argumentos que se añaden reemplazan al comando por defecto del servicio. `-DskipUnitTests`
+es una propiedad declarada en el `pom.xml`: el interruptor propio de Maven para esto se llama
+`maven.test.skip.exec`, que no es algo que valga la pena pedirle a nadie que recuerde.
+
+Las comillas de la última fila no son adorno: PowerShell corta un argumento sin comillas en el
+punto —Maven recibiría `-Dit` y `.test=ApiKeySecurityIT` por separado— y es el único comando de
+la tabla con un punto en el nombre de la propiedad. En `cmd` y en un shell POSIX las comillas no
+cambian nada, así que la forma entrecomillada sirve para los tres.
+
+Tres notas sobre el servicio `test`:
 
 - Está asignado a un perfil, de modo que **no interviene en `docker compose up`**. Es
   herramienta de desarrollo, no parte del sistema en ejecución.
 - Las dependencias se guardan en un volumen con nombre, así que solo la primera ejecución
   paga la descarga. Las siguientes tardan unos segundos.
+- Monta el socket de Docker, que es lo que le permite a Testcontainers levantar la base de
+  datos de los tests de integración. Los unitarios no lo usan.
 
 ---
 
@@ -472,7 +704,15 @@ El esquema lo gestiona Flyway. Hibernate está configurado con `ddl-auto: valida
 que cualquier divergencia entre una entidad y su migración detiene el arranque en lugar de
 manifestarse en tiempo de ejecución.
 
-Dos detalles del diseño de la tabla merecen mención:
+**Una migración aplicada no se toca.** Flyway guarda el *checksum* de cada archivo que ejecutó,
+así que editar uno ya aplicado no es una mala práctica que alguien podría señalar: es un fallo
+de arranque, inmediato y ruidoso. Mientras el esquema no se haya aplicado en ningún entorno que
+importe, corregir `V1` en el sitio y descartar el volumen con `docker compose down -v` es más
+limpio que arrastrar una migración correctiva por algo que nunca existió afuera. Desde el primer
+despliegue real eso se termina, y todo cambio —incluso agregar una columna— es un archivo nuevo.
+
+Cuatro detalles del diseño de la tabla merecen mención. Los dos primeros son sobre cómo se
+consulta; los dos últimos, sobre qué pasa cuando dos instancias escriben a la vez.
 
 **`priority_rank` es una columna generada.** Ordenar por la columna textual `priority`
 produce un orden alfabético en el que `'LOW'` precede a `'MEDIUM'`, invirtiendo en silencio
@@ -482,6 +722,24 @@ desincronizarse del valor del que depende.
 **El índice de reclamo es parcial** sobre `status = 'PENDING'`. Solo las filas pendientes se
 consultan, de modo que el índice permanece proporcional al trabajo acumulado y no al
 histórico completo.
+
+**El historial de intentos es único por número**, y eso hace más que higiene. El reaper no
+distingue una instancia muerta de una lenta: si el destino tarda más que el umbral, la fila se
+libera, otra instancia la entrega, y la primera vuelve con una copia vieja del estado. La
+restricción `uk_attempt_notification_number` es lo que la frena, porque el número de intento se
+deriva de `attempts` —el campo que quedaría viejo—, así que quien vuelve tarde calcula un
+número que el otro ya usó. Como el intento y la actualización de la notificación van en la misma
+transacción, el choque revierte las dos, y una entrega exitosa no queda pisada por el resultado
+tardío de quien perdió la carrera.
+
+**La columna `version` existe para esa misma carrera, declarada en vez de heredada.** La
+protección de arriba es correcta pero indirecta: depende de que el número de intento se derive de
+`attempts`, y se evaporaría el día que alguien los asignara con una secuencia. Un contador de
+escrituras hace explícito el bloqueo optimista, y convierte "perdí la carrera" en un evento con
+nombre propio en lugar de un error de integridad indistinguible de un defecto. **Todavía no está
+conectada**: la anota la entidad del despachador, que es el único que sostiene un agregado
+mientras ocurre una llamada de red. Hasta entonces la columna se escribe con su valor por defecto
+y nadie la lee.
 
 ### Ciclo de vida de una notificación
 
@@ -544,6 +802,24 @@ estado inválido con independencia del camino por el que llegue.
 Además del coste que se detalla junto a cada decisión, hay cosas que quedaron fuera de forma
 consciente. Se enumeran aquí con el problema concreto que dejan abierto.
 
+### Los límites de tamaño son una elección, y el enunciado no los pedía
+
+El documento define los campos por su tipo —`String`, `Map<String,String>`— y no da tamaños para
+ninguno. Los cuatro números de `body` y `metadata` los elegí yo, leyendo lo que sí dice: *"el
+contenido del **mensaje**"* y *"**campos** adicionales opcionales"*. Un mensaje no es un
+documento, y unos campos adicionales se cuentan.
+
+El criterio fue el techo **más bajo que nunca rechaza una petición legítima**, no el más alto que
+el sistema aguanta. Un techo demasiado alto deja de proteger.
+
+El precio es real: un cliente con un cuerpo legítimamente enorme —un informe embebido, digamos—
+se topa con un `400` en vez de un envío. Si ese caso apareciera, la respuesta correcta no sería
+subir el número sino separar el contenido del aviso: guardar el informe en otro lado y mandar su
+enlace, que es lo que un canal de notificaciones hace bien.
+
+La alternativa —no poner techo— no es neutral, aunque lo parezca. Sin él, quien decide cuánto
+almacenamiento consume el servicio es el llamador.
+
 ### No hay *circuit breaker*
 
 Es la ausencia más significativa. Los reintentos se calculan por notificación y de manera
@@ -603,22 +879,19 @@ apuntar a una dirección interna.
 Se acepta como limitación deliberada porque el único destino previsto forma parte del propio
 stack, y la autenticación restringe quién puede enviar notificaciones.
 
-### Un llamador sin credencial no distingue un error de una ruta inexistente
+### Un llamador sin credencial no distingue una ruta protegida de una inexistente
 
-Cuando una petición termina en error, el contenedor la redespacha internamente a `/error`, y
-esa ruta queda denegada como todas las demás. La consecuencia visible: `POST /actuator/health`
-—un método no admitido sobre la única ruta abierta— responde `401` en lugar del `405` que
-correspondería. Con credencial válida sí devuelve `405` con su cabecera `Allow: GET`.
+Sin credencial, `GET /actuator/metrics` —que existe y está protegida— y `GET /no-existe`
+responden **las dos `401`**. Devolver el estado exacto de cada una le entregaría a cualquiera un
+mapa del servicio: bastaría con recorrer un diccionario de rutas para saber cuáles existen. Se
+eligió el silencio, y lo fija un test.
 
-Es deliberado. Abrir el redespacho de error devolvería el estado correcto, y de paso le
-entregaría a cualquiera un mapa del servicio: una ruta inexistente pasaría a responder `404`
-mientras una ruta real y protegida sigue en `401`, y bastaría con recorrer un diccionario para
-saber qué existe. Hoy las dos responden `401` y no se pueden separar.
+El precio es que un llamador anónimo no puede distinguir *"no tenés permiso"* de *"eso no
+existe"*. Con un catálogo de rutas públicas más grande, la decisión se revisaría.
 
-Se eligió el silencio. El precio es un código de estado impreciso sobre un endpoint público
-invocado con el método equivocado, cosa que ningún cliente del sistema hace —el healthcheck
-del contenedor usa `GET`—; el beneficio es que la superficie no se puede cartografiar sin
-credencial. Con un catálogo de rutas públicas más grande, la decisión se revisaría.
+La única excepción es `/actuator/health`, abierta a propósito y documentada como tal: ahí un
+anónimo sí recibe la respuesta exacta —`200` a un `GET`, `405` a un `POST`—. No se pierde nada,
+porque su existencia nunca fue un secreto.
 
 ### El canal `EMAIL` no está implementado
 
@@ -649,10 +922,13 @@ el trabajo del despachador, pero eso mitiga el problema sin resolverlo.
 | Esquema de base de datos y migraciones | Completo |
 | Stack de Docker Compose | Completo |
 | Modelo de dominio y máquina de estados | Completo |
-| API REST de creación y consulta | Pendiente |
-| Idempotencia de entrada (`Idempotency-Key`) y de salida (`X-Notification-Id`) | Pendiente |
+| Persistencia de notificaciones | Completo |
+| API REST de creación (`POST /api/v1/notifications`) | Completo |
+| Idempotencia de entrada (`Idempotency-Key`) | Completo |
 | Autenticación | Completo |
+| Tests unitarios | Completo |
+| Tests de integración | Completo |
+| API REST de consulta (`GET /api/v1/notifications/{id}`) | Pendiente — el estado se consulta hoy contra la base de datos, como muestra *Cómo inspeccionar el estado* |
 | Worker de despacho y canales | Pendiente |
-| Tests unitarios del dominio | Completo |
-| Tests de integración | Pendiente |
+| Idempotencia de salida (`X-Notification-Id`) | Pendiente — la escribe el canal `SERVICE`, que llega con el despachador |
 | Consideración sobre Jakarta EE | Pendiente |

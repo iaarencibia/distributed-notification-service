@@ -99,8 +99,21 @@ services:
     volumes:
       - .:/build
       - maven-repo:/root/.m2
+      # The integration tests start a PostgreSQL of their own through Testcontainers, which
+      # drives the daemon this socket reaches.
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      # That database comes up as a sibling of this container on the host, not as a child, so
+      # the `localhost` Testcontainers would otherwise report is the wrong address for it.
+      TESTCONTAINERS_HOST_OVERRIDE: host.docker.internal
+    extra_hosts:
+      # Docker Desktop resolves that name by itself; a plain Linux daemon does not, and the
+      # tests have to run on the reviewer's machine too.
+      - "host.docker.internal:host-gateway"
     working_dir: /build
-    command: ["mvn", "-B", "-ntp", "test"]
+    # `verify` and not `test`: surefire runs the unit tests, and the integration tests are named
+    # *IT and belong to failsafe, which only runs in the later phase. `test` would skip them.
+    command: ["mvn", "-B", "-ntp", "verify"]
 
 volumes:
   postgres-data:

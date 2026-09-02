@@ -75,6 +75,47 @@ class ApiKeyAuthenticationFilterTest {
                 .isNotNull();
     }
 
+    @Test
+    @DisplayName("saves the recognised caller where a later dispatch of the same request finds it")
+    void savesTheContextForALaterDispatch() throws Exception {
+        // The holder is cleared when the REQUEST pass ends, and this filter does not run again on
+        // the ERROR or ASYNC dispatch that can follow. Without the save, an authenticated caller
+        // whose request takes either path comes back as anonymous and is told its credential was
+        // missing. That was a real defect, found by the judgment day of the previous PR.
+        //
+        // It is asserted here rather than end to end, and that is a change worth knowing about:
+        // it used to be covered by a test that drove a real servlet container into the ERROR
+        // dispatch. Since the web adapter answers errors itself, that dispatch no longer happens
+        // and the end-to-end test stopped being able to fail. This one still can.
+        RequestAttributeSecurityContextRepository repository =
+                new RequestAttributeSecurityContextRepository();
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/anything");
+        request.addHeader(HttpHeaders.AUTHORIZATION, "ApiKey " + KEY);
+
+        new ApiKeyAuthenticationFilter(KEY, repository)
+                .doFilter(request, new MockHttpServletResponse(), new MockFilterChain());
+
+        assertThat(repository.loadDeferredContext(request).get().getAuthentication())
+                .as("the context has to outlive the holder, which the request pass clears")
+                .isNotNull();
+    }
+
+    @Test
+    @DisplayName("saves nothing for a caller it did not recognise")
+    void savesNothingForAnUnrecognisedCaller() throws Exception {
+        // The other half of the pair: carrying the context across a dispatch must not become a
+        // way in for someone who never presented a credential the service accepted.
+        RequestAttributeSecurityContextRepository repository =
+                new RequestAttributeSecurityContextRepository();
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/anything");
+        request.addHeader(HttpHeaders.AUTHORIZATION, "ApiKey not-" + KEY);
+
+        new ApiKeyAuthenticationFilter(KEY, repository)
+                .doFilter(request, new MockHttpServletResponse(), new MockFilterChain());
+
+        assertThat(repository.containsContext(request)).isFalse();
+    }
+
     /**
      * @param configuredKey the key the service is started with
      * @param authorization the raw header the caller sends

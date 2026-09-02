@@ -43,6 +43,12 @@ CREATE TABLE notification
     updated_at      TIMESTAMPTZ  NOT NULL,
     sent_at         TIMESTAMPTZ,
 
+    -- Write counter, not an attempt counter: it moves on every update of the row and nothing
+    -- ever reads it for meaning. It exists so that a dispatcher holding a copy from before the
+    -- reaper released its row cannot write over a newer state. The dispatcher wires it in; a
+    -- row inserted by the intake endpoint has no concurrent writer to lose to.
+    version         BIGINT       NOT NULL DEFAULT 0,
+
     -- Numeric ordering key for priority. Kept as a generated column because the textual
     -- values do not sort correctly on their own: alphabetically 'LOW' precedes 'MEDIUM'.
     -- Deriving it in the database guarantees it can never drift from `priority`.

@@ -48,6 +48,15 @@ class NotificationPayloadTest {
         return new NotificationPayload(RECIPIENT, Channel.SERVICE, SUBJECT, BODY, Priority.HIGH, metadata);
     }
 
+    /** A map of the given size, with every key distinct and every value within its limit. */
+    private static Map<String, String> entries(int count) {
+        Map<String, String> metadata = new HashMap<>();
+        for (int i = 0; i < count; i++) {
+            metadata.put("key-" + i, "value-" + i);
+        }
+        return metadata;
+    }
+
     @Nested
     @DisplayName("required fields")
     class RequiredFields {
@@ -117,6 +126,25 @@ class NotificationPayloadTest {
         }
 
         @Test
+        @DisplayName("accepts a body exactly at the column width and rejects one over")
+        void bodyBoundary() {
+            assertThat(withBody("x".repeat(16384)).body()).hasSize(16384);
+            assertThatIllegalArgumentException().isThrownBy(() -> withBody("x".repeat(16385)));
+        }
+
+        @Test
+        @DisplayName("measures the body in characters too, so an emoji costs one and not two")
+        void bodyCountsCharactersAndNotCodeUnits() {
+            // The same trap the subject fell into, on the field most likely to carry one: a body
+            // of 16384 emoji is 32768 UTF-16 units, and the column takes it.
+            String atTheLimit = "🚀".repeat(16384);
+
+            assertThat(withBody(atTheLimit).body()).isEqualTo(atTheLimit);
+            assertThatIllegalArgumentException()
+                    .isThrownBy(() -> withBody("🚀".repeat(16385)));
+        }
+
+        @Test
         @DisplayName("measures characters, not UTF-16 units, as the column does")
         void countsCharactersAndNotCodeUnits() {
             // An emoji is one character for PostgreSQL and two for String.length(). Measured
@@ -133,6 +161,39 @@ class NotificationPayloadTest {
     @Nested
     @DisplayName("metadata")
     class Metadata {
+
+        @Test
+        @DisplayName("accepts the largest allowed number of entries and rejects one more")
+        void entryCountBoundary() {
+            assertThat(withMetadata(entries(32)).metadata()).hasSize(32);
+            assertThatIllegalArgumentException().isThrownBy(() -> withMetadata(entries(33)));
+        }
+
+        @Test
+        @DisplayName("bounds each key, at the width a correlation id already uses")
+        void keyBoundary() {
+            assertThat(withMetadata(Map.of("k".repeat(128), "v")).metadata()).hasSize(1);
+            assertThatIllegalArgumentException()
+                    .isThrownBy(() -> withMetadata(Map.of("k".repeat(129), "v")));
+        }
+
+        @Test
+        @DisplayName("bounds each value at the width a recipient uses, so a URL fits in either")
+        void valueBoundary() {
+            assertThat(withMetadata(Map.of("k", "v".repeat(2048))).metadata()).hasSize(1);
+            assertThatIllegalArgumentException()
+                    .isThrownBy(() -> withMetadata(Map.of("k", "v".repeat(2049))));
+        }
+
+        @Test
+        @DisplayName("names the offending key, since a caller holding many needs to know which")
+        void namesTheOffendingKey() {
+            // A message saying only "a metadata value is too long" leaves the caller to find it
+            // by bisecting its own map, which is work this service already did.
+            assertThatIllegalArgumentException()
+                    .isThrownBy(() -> withMetadata(Map.of("orderId", "v".repeat(2049))))
+                    .withMessageContaining("orderId");
+        }
 
         @Test
         @DisplayName("defaults to an empty map when omitted")

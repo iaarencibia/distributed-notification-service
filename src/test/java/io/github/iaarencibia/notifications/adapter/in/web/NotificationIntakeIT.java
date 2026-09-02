@@ -277,6 +277,52 @@ class NotificationIntakeIT extends IntegrationTestSupport {
     }
 
     @Test
+    @DisplayName("refuses a body wider than the column that has to hold it")
+    void refusesAnOversizedBody() throws Exception {
+        // The endpoint is the only way in, so a limit the domain and the column agree on is worth
+        // nothing here unless this door enforces it too. Measured against the running service
+        // before this test existed: a body of five megabytes was accepted and stored whole.
+        mockMvc.perform(submit(VALID_BODY.replace("It is on its way.", "x".repeat(16385))))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.errors.body").value("must not exceed 16384 characters"));
+    }
+
+    @Test
+    @DisplayName("refuses more metadata entries than the schema is willing to carry")
+    void refusesTooManyMetadataEntries() throws Exception {
+        StringBuilder entries = new StringBuilder();
+        for (int i = 0; i < 33; i++) {
+            entries.append(i == 0 ? "" : ",").append("\"k").append(i).append("\":\"v\"");
+        }
+
+        mockMvc.perform(submit(bodyWithMetadata(entries.toString())))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.errors.metadata").value("must not exceed 32 entries"));
+    }
+
+    @Test
+    @DisplayName("names the metadata entry whose value is too long, not merely the map")
+    void namesTheOffendingMetadataEntry() throws Exception {
+        // A caller carrying thirty-two entries cannot act on "metadata is invalid". It can act on
+        // the key, which is the one piece of its own text worth sending back.
+        mockMvc.perform(submit(bodyWithMetadata("\"orderId\":\"" + "v".repeat(2049) + "\"")))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.errors.['metadata[orderId]']")
+                        .value("must not exceed 2048 characters"));
+    }
+
+    @Test
+    @DisplayName("refuses a metadata key wider than an identifier ever needs to be")
+    void refusesAnOversizedMetadataKey() throws Exception {
+        String key = "k".repeat(129);
+
+        mockMvc.perform(submit(bodyWithMetadata("\"" + key + "\":\"v\"")))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.errors.['metadata[" + key + "]']")
+                        .value("must not exceed 128 characters"));
+    }
+
+    @Test
     @DisplayName("refuses a correlation id outside the character set it is allowed")
     void refusesAMalformedCorrelationId() throws Exception {
         // The value is written into a structured log line on every attempt, which is why the set
@@ -393,6 +439,11 @@ class NotificationIntakeIT extends IntegrationTestSupport {
                     .isEqualTo(result.getResponse().getStatus());
             assertThat(problem.get("detail").asText()).isNotBlank();
         }
+    }
+
+    /** The valid body, with its metadata object replaced by the given entries verbatim. */
+    private static String bodyWithMetadata(String entries) {
+        return VALID_BODY.replace("\"orderId\": \"4471\"", entries);
     }
 
     private static MockHttpServletRequestBuilder submit(String body) {

@@ -42,7 +42,12 @@ class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 
     /**
      * A field that failed validation is reported with the field's name and what it needed, which
-     * is the descriptive message the brief asks for. Nothing the caller sent is echoed back.
+     * is the descriptive message the brief asks for. No field <em>value</em> is echoed back.
+     *
+     * <p>One name is the caller's own text rather than ours: a violation inside {@code metadata}
+     * is reported as {@code metadata[<key>]}, because a caller holding thirty-two entries has to
+     * be told which one to shorten. Only the key travels, never the value, and it goes back as a
+     * JSON string to the client that sent it.
      */
     @Override
     protected ResponseEntity<Object> handleMethodArgumentNotValid(

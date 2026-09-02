@@ -26,8 +26,7 @@ import java.util.UUID;
  *
  * <p>The answer is {@code 202 Accepted}, never {@code 201 Created} -- and not because nothing was
  * created, since the row is. {@code 201} is an answer about creation, and what this caller has to
- * know is that the delivery it asked for has not happened yet. {@code 201} also owes a
- * {@code Location} naming the new resource, and there is no endpoint yet to point one at.
+ * know is that the delivery it asked for has not happened yet.
  */
 @RestController
 @RequestMapping(path = "/api/v1/notifications")

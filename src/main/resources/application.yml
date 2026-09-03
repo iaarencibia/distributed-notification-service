@@ -33,6 +33,14 @@ spring:
   jackson:
     default-property-inclusion: non_null
 
+  task:
+    scheduling:
+      # Two, so the reaper has a thread of its own. On the default of one it shares with the
+      # dispatch pass, and a saturated pass runs deliveries on that thread -- which would stall
+      # the recovery of abandoned claims at exactly the moment claims are being abandoned.
+      pool:
+        size: 2
+
 server:
   port: ${SERVER_PORT:8080}
   error:
@@ -94,6 +102,11 @@ notifications:
     api-key: ${NOTIFICATIONS_API_KEY:local-dev-api-key-change-me}
 
   dispatch:
+    # Whether the timer that drives the worker is registered at all. Not bound to the typed
+    # properties on purpose: nothing in the application reads it, it decides whether a bean
+    # exists. Turned off by the integration tests, which drive the use case directly so that
+    # what they assert does not depend on when a poll happened to fire.
+    scheduled: ${DISPATCH_SCHEDULED:true}
     # How often the worker looks for claimable rows. This interval is the floor on
     # dispatch latency; it is the price paid for not running a broker.
     poll-interval: ${DISPATCH_POLL_INTERVAL:1s}

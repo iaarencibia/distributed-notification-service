@@ -8,7 +8,9 @@ import io.github.iaarencibia.notifications.domain.Notification;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
@@ -27,8 +29,7 @@ class ChannelWiringTest {
     @Test
     @DisplayName("reads the deliverable channels off the adapters, not off a list")
     void derivesTheChannelsFromTheAdapters() {
-        DeliverableChannels deliverable =
-                config.deliverableChannels(List.of(senderFor(Channel.LOG), senderFor(Channel.SERVICE)));
+        DeliverableChannels deliverable = deliverableFrom(Channel.LOG, Channel.SERVICE);
 
         assertThat(deliverable.includes(Channel.LOG)).isTrue();
         assertThat(deliverable.includes(Channel.SERVICE)).isTrue();
@@ -42,11 +43,27 @@ class ChannelWiringTest {
     void anAddedAdapterIsEnough() {
         // The whole promise of deriving the set: no validation and no error message has to be
         // found and updated for EMAIL to start being accepted.
-        DeliverableChannels deliverable = config.deliverableChannels(
-                List.of(senderFor(Channel.LOG), senderFor(Channel.SERVICE), senderFor(Channel.EMAIL)));
+        DeliverableChannels deliverable =
+                deliverableFrom(Channel.LOG, Channel.SERVICE, Channel.EMAIL);
 
         assertThat(deliverable.includes(Channel.EMAIL)).isTrue();
         assertThat(deliverable.describe()).isEqualTo("LOG, SERVICE, EMAIL");
+    }
+
+    @Test
+    @DisplayName("keys each adapter by the channel it answers for")
+    void keysEachAdapterByItsChannel() {
+        // The registry the dispatcher reads to decide who delivers. Asserted on identity, not on
+        // size: keying every adapter under one channel would leave a map of the right shape and
+        // send everything through the wrong sender.
+        NotificationChannelSender log = senderFor(Channel.LOG);
+        NotificationChannelSender service = senderFor(Channel.SERVICE);
+
+        Map<Channel, NotificationChannelSender> senders =
+                config.channelSenders(List.of(log, service));
+
+        assertThat(senders.get(Channel.LOG)).isSameAs(log);
+        assertThat(senders.get(Channel.SERVICE)).isSameAs(service);
     }
 
     @Test
@@ -55,9 +72,19 @@ class ChannelWiringTest {
         // Without this, which of the two delivers would be settled by the order Spring returns
         // the beans in -- a behaviour nobody chose and no test could pin.
         assertThatIllegalStateException()
-                .isThrownBy(() -> config.deliverableChannels(
+                .isThrownBy(() -> config.channelSenders(
                         List.of(senderFor(Channel.SERVICE), senderFor(Channel.SERVICE))))
                 .withMessageContaining("SERVICE");
+    }
+
+    /**
+     * @param channels the channels adapters are present for
+     * @return what the wiring makes deliverable, through the registry the application reads
+     */
+    private DeliverableChannels deliverableFrom(Channel... channels) {
+        List<NotificationChannelSender> senders =
+                Arrays.stream(channels).map(ChannelWiringTest::senderFor).toList();
+        return config.deliverableChannels(config.channelSenders(senders));
     }
 
 

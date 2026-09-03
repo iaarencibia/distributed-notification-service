@@ -64,10 +64,12 @@ espacio que hay dentro de una comilla escapada**. Medido con
 `{"subject":"Tu`, y el resto del JSON se perdió por el camino. La respuesta es un `400` que
 parece del servicio y es del intérprete.
 
-Por eso el único comando de este README con cuerpo JSON —el `POST` de la sección *API*— está
-escrito también con **`Invoke-RestMethod`**, que recibe el cuerpo como una variable y no pasa por
-ese análisis. Quien prefiera seguir con curl puede anteponer el token `--%`, que apaga el
-analizador de PowerShell, a cambio de escribir todo en una sola línea.
+Por eso el `POST` de la sección *API* está escrito también con **`Invoke-RestMethod`**, que
+recibe el cuerpo como una variable y no pasa por ese análisis. Es el único bloque de PowerShell
+del documento, y alcanza: la demostración de *[Cómo ver el reintento
+ocurriendo](#cómo-ver-el-reintento-ocurriendo)* manda ese mismo cuerpo cambiando el destino y las
+claves, así que se adapta desde ahí. Quien prefiera seguir con curl puede anteponer el token
+`--%`, que apaga el analizador de PowerShell, a cambio de escribir todo en una sola línea.
 
 En **`cmd`** la continuación de línea es `^` y no `\` —con `\` solo se ejecuta el primer renglón,
 y la petición sale sin sus cabeceras—, y las comillas simples no se quitan, así que el cuerpo va
@@ -455,6 +457,89 @@ comparación en el contador de intentos.
 > WireMock responde con un cuerpo vacío, así que conviene el `-i` para ver la confirmación:
 > la primera línea de la respuesta debe ser `HTTP/1.1 200 OK`.
 
+### Cómo ver el reintento ocurriendo
+
+Tres notificaciones con **el mismo `X-Correlation-Id`** a tres destinos distintos. Es una sola
+demostración y prueba tres cosas: el agrupamiento por operación, la clasificación del fallo, y
+que el historial de intentos explica cada desenlace.
+
+El identificador es `order-9001` y no el `order-4471` del ejemplo de *API*, a propósito: si
+ejecutaste aquel ejemplo, su fila comparte esa correlación y aparecería en esta consulta.
+
+Primero, reiniciar el escenario de `/hook/flaky`, que es con estado:
+
+```bash
+curl -i -X POST http://localhost:8081/__admin/scenarios/reset
+```
+
+Después, esta petición **tres veces**, cambiando `<destino>` por `ok`, `flaky` y `broken`. La
+clave de idempotencia cambia con el destino porque son tres envíos distintos, no uno repetido:
+
+```bash
+curl -i -X POST http://localhost:8080/api/v1/notifications \
+  -H "Authorization: ApiKey local-dev-api-key-change-me" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: demo-9001-<destino>" \
+  -H "X-Correlation-Id: order-9001" \
+  -d '{
+        "recipient": "http://wiremock:8080/hook/<destino>",
+        "channel": "SERVICE",
+        "subject": "Tu pedido fue enviado",
+        "body": "Va en camino.",
+        "priority": "HIGH"
+      }'
+```
+
+En **PowerShell** hay que partir del bloque `Invoke-RestMethod` de la sección *API* y cambiar
+tres cosas: el `recipient` dentro de `$body`, y la `Idempotency-Key` y el `X-Correlation-Id`
+dentro de `$headers`. Con `curl.exe` el cuerpo JSON se corta, por el motivo explicado en
+*[Sobre el intérprete de comandos](#sobre-el-intérprete-de-comandos)*.
+
+Las tres responden `202` con el `id` de su notificación. Guardá el de `flaky`.
+
+**Hay que esperar unos 25 segundos**, y el número no es arbitrario: con la configuración que
+entrega el proyecto —`initial-backoff` de 5 s y `multiplier` 3.0— el segundo intento de
+`/hook/flaky` ocurre 5 s después del primero y el tercero 15 s después del segundo, más el
+jitter, que solo suma, y hasta un segundo de sondeo entre cada uno. Consultar antes muestra la
+notificación a mitad de camino, en `PENDING` con un intento hecho, que es el estado correcto y
+no un fallo.
+
+```bash
+docker compose exec postgres psql -U notifications -d notifications -c "SELECT recipient, status, attempts, last_error FROM notification WHERE correlation_id = 'order-9001' ORDER BY recipient;"
+```
+
+Salida esperada, con los tres desenlaces que el requisito de resiliencia distingue:
+
+```
+            recipient             | status | attempts |                   last_error
+----------------------------------+--------+----------+------------------------------------------------
+ http://wiremock:8080/hook/broken | FAILED |        1 | the destination rejected the notification with 400
+ http://wiremock:8080/hook/flaky  | SENT   |        3 |
+ http://wiremock:8080/hook/ok     | SENT   |        1 |
+```
+
+Las dos primeras filas son las que importan. `/hook/broken` responde `400` y termina **en un solo
+intento**: reintentar una petición que el destino considera mal formada no la vuelve válida.
+`/hook/flaky` responde `503` dos veces y termina en `SENT` con tres intentos, porque un `503` es
+una condición que puede pasar. La fila de `flaky` no conserva `last_error`: una entrega exitosa
+lo limpia, y el historial de sus fracasos vive en la otra tabla.
+
+El historial de la que reintentó, con el `id` que devolvió su `202`:
+
+```bash
+docker compose exec postgres psql -U notifications -d notifications -c "SELECT attempt_number, outcome, response_code, duration_ms FROM notification_attempt WHERE notification_id = '<uuid>' ORDER BY attempt_number;"
+```
+
+```
+ attempt_number |      outcome      | response_code | duration_ms
+----------------+-------------------+---------------+-------------
+              1 | RETRYABLE_FAILURE |           503 |          12
+              2 | RETRYABLE_FAILURE |           503 |           8
+              3 | SUCCESS           |           200 |           9
+```
+
+Las duraciones son las de una corrida concreta y van a diferir; lo que no cambia es la secuencia.
+
 ---
 
 ## Cómo correr los tests
@@ -472,29 +557,81 @@ las rutas las resuelve Compose y no el intérprete.
 Salida esperada, en dos bloques:
 
 ```
-[INFO] Tests run: 178, Failures: 0, Errors: 0, Skipped: 0     ← unitarios
-[INFO] Tests run: 47, Failures: 0, Errors: 0, Skipped: 0      ← integración
+[INFO] Tests run: 216, Failures: 0, Errors: 0, Skipped: 0     ← unitarios
+[INFO] Tests run: 61, Failures: 0, Errors: 0, Skipped: 0      ← integración
 [INFO] BUILD SUCCESS
 ```
 
 El número de tests crece a medida que avanza la implementación; lo que debe verificarse es
 que `Failures` y `Errors` sean cero en los dos.
 
-Entre los unitarios aparecen seis `WARN` de `ConfigurationPropertiesBindException`. Son
-esperados: hay seis pruebas que verifican que una configuración inválida **detiene el arranque**
-—un identificador de instancia más largo que su columna, uno en blanco, una clave de API en
-blanco, el bloque de seguridad ausente, un presupuesto de reintentos en cero, y el bloque de
-reintentos ausente— y para comprobarlo tienen que provocar ese fallo. El aviso es la alarma
-sonando, no un problema.
+### Tres avisos esperados, y por qué no se silencian
+
+Conviene separar dos usos de la palabra *falla* que se confunden seguido. **Un test que falla**
+es un resultado en rojo y hay trabajo por hacer. **Un test que verifica que algo falla** está en
+verde, y lo que falló es el sujeto de la prueba, porque fallar es el comportamiento correcto.
+Esta suite tiene los tres avisos que produce esa segunda clase.
+
+**Uno es un stack trace**, y es el único de toda la corrida:
+
+```
+WARN  ...DispatchSchedulerConfig -- the dispatch pass failed and will be retried on the next tick
+java.lang.IllegalStateException: the database is unreachable
+```
+
+Esa excepción la inyecta el test, y su mensaje está escrito a mano. Lo que comprueba
+`DispatchSchedulerConfigTest` es que una pasada que revienta **no termina el temporizador**: si la
+base de datos se vuelve inalcanzable un minuto, el proceso tiene que seguir sondeando en lugar de
+quedarse corriendo y en silencio para siempre. El stack trace aparece porque la excepción se le
+pasa al registro a propósito — sin ella, un operador leería *"la pasada falló"* sin ninguna forma
+de saber por qué.
+
+En qué orden salen los tres no está fijado: el `pom.xml` no fija `<runOrder>`, así que surefire
+toma las clases en el orden del sistema de archivos, y ese orden puede cambiar de una máquina a
+otra. Lo que hay que saber reconocer es cuáles son, no dónde aparecen.
+
+Otro es una tanda de `WARN` de `ConfigurationPropertiesBindException`. Son
+esperados: `NotificationsPropertiesTest` verifica que una configuración inválida **detiene el
+arranque** —un identificador de instancia más largo que su columna, un presupuesto de reintentos
+en cero, un intervalo de sondeo en cero, un umbral del reaper en cero, cada bloque ausente— y
+para comprobarlo tiene que provocar ese fallo en cada caso. El aviso es la alarma sonando.
+
+Lo que sí sería un problema es ver `Failures` distinto de cero en esa clase: querría decir que un
+contexto **arrancó** cuando debía negarse, o sea que la validación al arranque dejó de funcionar.
+La garantía la da el número, no el aviso.
+
+El que queda es un contexto que se cancela, y lo emite `ChannelConfigTest`:
+
+```
+WARN  ...AnnotationConfigApplicationContext -- Exception encountered during context
+initialization - cancelling refresh attempt: ...UnsatisfiedDependencyException: ...
+No qualifying bean of type 'org.springframework.web.client.RestClient' available
+```
+
+Ese fallo es el resultado que se busca. El `RestClient` del canal SERVICE lleva tiempos de
+espera elegidos para un destino que este servicio no controla, y se declara de manera que el
+contenedor **no** lo ofrezca a quien pida un `RestClient` por tipo a secas —otra llamada
+heredaría cinco segundos de lectura que nadie eligió para ella, y se vería correcta mientras lo
+hace—. Para comprobarlo hay que levantar un contexto que lo pida así y verlo negarse.
+
+**Por qué no se silencian.** Se podría bajar el nivel de esos registros con un
+`logback-test.xml` de dos líneas. Pero ese archivo pisa la configuración de registro de
+**toda** la suite, incluidos los tests de integración que emiten ECS, y apagaría también el aviso
+de un contexto que falle por algo **no** previsto — que es justo el que hay que ver. Es comprar
+silencio a cambio de ceguera, para ahorrar unas líneas de consola. Se documentan en lugar de
+apagarse.
 
 ### Los dos niveles
 
 Son dos suites con costos muy distintos, y por eso están separadas.
 
-Los **unitarios** no levantan contenedores, y salvo `NotificationsPropertiesTest` —que necesita
-un contexto de Spring para comprobar que una configuración inválida impide arrancar— tampoco
-levantan contexto. Corren en segundos
-y son los que se ejecutan cien veces mientras se trabaja. Los de **integración** arrancan la
+Los **unitarios** no levantan contenedores, y casi ninguno levanta contexto de Spring. Las
+excepciones son tres, y las tres por el mismo motivo —lo que prueban es que el contenedor haga o
+deje de hacer algo—: `NotificationsPropertiesTest`, que comprueba que una configuración inválida
+impide arrancar; `DispatchSchedulerConfigTest`, que comprueba que el temporizador del
+despachador se registra salvo que se lo apague; y `ChannelConfigTest`, que comprueba que el
+cliente saliente del canal SERVICE no se le entrega a quien lo pida por tipo a secas. Corren en
+segundos y son los que se ejecutan cien veces mientras se trabaja. Los de **integración** arrancan la
 aplicación completa contra un PostgreSQL real que Testcontainers levanta para ellos, y prueban
 lo que solo la base de datos puede confirmar —el índice único de idempotencia, las restricciones
 del esquema, la cadena de filtros sobre un servidor de verdad—.
@@ -711,9 +848,9 @@ instrucción", y la política de reintentos usa su propio *backoff*, que nunca e
 habría hecho igual.
 
 Un servidor SMTP de pruebas como Mailhog acepta prácticamente cualquier mensaje, por lo que
-no permite demostrar esa diferencia. Con WireMock, en cambio, el reintento va a ser observable
-en cuanto exista el despachador: una sola notificación enviada a `/hook/flaky` producirá una
-secuencia visible de intentos.
+no permite demostrar esa diferencia. Con WireMock, en cambio, el reintento es observable: una
+sola notificación enviada a `/hook/flaky` produce una secuencia de intentos que queda escrita en
+`notification_attempt`. Está en *[Cómo ver el reintento ocurriendo](#cómo-ver-el-reintento-ocurriendo)*.
 
 #### Qué recibe el destino del canal `SERVICE`
 
@@ -799,10 +936,14 @@ tardío de quien perdió la carrera.
 protección de arriba es correcta pero indirecta: depende de que el número de intento se derive de
 `attempts`, y se evaporaría el día que alguien los asignara con una secuencia. Un contador de
 escrituras hace explícito el bloqueo optimista, y convierte "perdí la carrera" en un evento con
-nombre propio en lugar de un error de integridad indistinguible de un defecto. **Todavía no está
-conectada**: la anota la entidad del despachador, que es el único que sostiene un agregado
-mientras ocurre una llamada de red. Hasta entonces la columna se escribe con su valor por defecto
-y nadie la lee.
+nombre propio en lugar de un error de integridad indistinguible de un defecto.
+
+El despachador la usa así: la consulta de reclamo devuelve, junto a cada notificación, **la
+versión que la fila tenía al ser reclamada**, y el resultado de la entrega se escribe contra ese
+número. Tiene que ser ése y no el actual —contra el valor de ahora la guarda pasaría siempre—.
+Si el reaper liberó la fila mientras esa instancia despachaba, su `UPDATE` ya movió la versión:
+la escritura tardía se rechaza, y el despachador registra que perdió la carrera en lugar de pisar
+el estado que dejó quien la ganó.
 
 ### Ciclo de vida de una notificación
 
@@ -833,15 +974,14 @@ registrar que se realizó siempre hay una brecha en la que el proceso puede caer
 modo que lo máximo que puede lograrse es *effectively once*: un emisor que entrega al
 menos una vez y un receptor que descarta lo repetido.
 
-El diseño aborda esa duplicación en los dos extremos. **La implementación de ambos
-mecanismos está pendiente**, pero la decisión ya está tomada y el esquema la refleja:
+El diseño aborda esa duplicación en los dos extremos, y los dos mecanismos están implementados:
 
-- **Hacia afuera**, cada entrega del canal `SERVICE` llevará el identificador de la
+- **Hacia afuera**, cada entrega del canal `SERVICE` lleva el identificador de la
   notificación en una cabecera `X-Notification-Id`, idéntica en el primer intento y en
   cada reintento. Un receptor que la registre puede descartar la entrega repetida. Sin ese
   identificador no podría hacerlo aunque quisiera, de modo que enviarlo es la parte del
   problema que sí está bajo control de este servicio.
-- **Hacia adentro**, el endpoint de creación aceptará una cabecera `Idempotency-Key`
+- **Hacia adentro**, el endpoint de creación acepta una cabecera `Idempotency-Key`
   opcional, porque este servicio es a su vez un receptor: si la respuesta a un `POST` se
   pierde en la red, un cliente prudente reintentará y crearía una segunda notificación. La
   columna `idempotency_key` y su índice único parcial ya existen en el esquema, de forma
@@ -913,8 +1053,28 @@ terminal plantea decisiones que no son mecánicas: si el contador de intentos se
 amplía el presupuesto, qué ocurre cuando la operación se invoca dos veces, y quién queda
 autorizado a hacerlo. Resolverlas a medias produciría un mecanismo peor que su ausencia.
 
-La contrapartida de mantenerlo terminal es que el recuento permanece auditable: `attempts`
-nunca se reinicia, de modo que ningún reencolado puede ocultar los intentos ya realizados.
+La contrapartida de mantenerlo terminal es que el recuento no se reinicia: ningún reencolado
+puede bajar `attempts` para disimular los intentos que ya se hicieron.
+
+### `max_attempts` acota los intentos registrados, no las llamadas de red
+
+`attempts` cuenta **entregas registradas**, y esa cifra puede quedar por debajo de la cantidad
+real de peticiones que salieron de este servicio.
+
+El caso es el mismo que hace falta el reaper. Una instancia reclama una notificación, hace el
+`POST`, y muere —o tarda más de lo que el reaper tolera— antes de escribir el resultado. El
+intento ocurrió: el destino recibió la petición y pudo haberla procesado. Pero no quedó
+registrado, así que cuando el reaper devuelve la fila a `PENDING` el contador sigue donde estaba
+y la notificación conserva su presupuesto entero.
+
+La consecuencia práctica es que un destino puede recibir más de `max_attempts` peticiones de una
+misma notificación. Es la otra cara de la semántica *at-least-once* declarada más arriba: el
+sistema prefiere entregar de más antes que perder una entrega. Lo que sí queda acotado con
+firmeza es el trabajo que el servicio se compromete a hacer **y a dejar asentado**.
+
+Cerrarlo del todo exige idempotencia del lado del receptor, que está fuera de nuestro control.
+Lo que se ofrece para eso es la cabecera `X-Notification-Id` de cada entrega, con la que un
+destino puede descartar lo que ya aceptó.
 
 ### Los destinos del canal `SERVICE` no están restringidos
 
@@ -997,8 +1157,8 @@ el trabajo del despachador, pero eso mitiga el problema sin resolverlo.
 | Tests unitarios | Completo |
 | Tests de integración | Completo |
 | API REST de consulta (`GET /api/v1/notifications/{id}`) | Pendiente — el estado se consulta hoy contra la base de datos, como muestra *Cómo inspeccionar el estado* |
-| Canales de despacho (`LOG` y `SERVICE`) | Completo — con sus tests, aún sin worker que los invoque |
-| Worker de despacho | Pendiente — sin él, una notificación aceptada queda `PENDING` y no se entrega |
+| Canales de despacho (`LOG` y `SERVICE`) | Completo |
+| Worker de despacho, reintentos y *reaper* | Completo |
 | Canal `EMAIL` | Pendiente — el ingreso lo rechaza en lugar de aceptar algo que no puede enviar |
 | Idempotencia de salida (`X-Notification-Id`) | Completo — el canal `SERVICE` la envía en cada entrega |
 | Consideración sobre Jakarta EE | Pendiente |

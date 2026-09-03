@@ -2,6 +2,9 @@ package io.github.iaarencibia.notifications.adapter.in.web;
 
 import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.exc.InvalidFormatException;
+import io.github.iaarencibia.notifications.application.DeliverableChannels;
+import io.github.iaarencibia.notifications.application.port.in.UndeliverableChannelException;
+import io.github.iaarencibia.notifications.domain.Channel;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -39,6 +42,18 @@ import java.util.stream.Collectors;
 class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(ApiExceptionHandler.class);
+
+    private final DeliverableChannels deliverableChannels;
+
+    /**
+     * @param deliverableChannels the same set the use case decides with. Held here only to
+     *                            describe it: a caller that named a channel it cannot use has to
+     *                            be told which ones it can, and reporting the contract is what a
+     *                            web adapter is for. Nothing here decides anything
+     */
+    ApiExceptionHandler(DeliverableChannels deliverableChannels) {
+        this.deliverableChannels = deliverableChannels;
+    }
 
     /**
      * A field that failed validation is reported with the field's name and what it needed, which
@@ -116,6 +131,24 @@ class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     }
 
     /**
+     * Answers a channel this deployment has no adapter for. Reported under {@code channel}, the
+     * same name the field carries in the request, so a caller reads it exactly as it reads any
+     * other rejected field -- the fact that this one was decided by the use case and not by Bean
+     * Validation is this service's business, not the caller's.
+     *
+     * @param exception the refusal, carrying what was asked for and what is available
+     * @return the problem detail sent back to the caller
+     */
+    @ExceptionHandler(UndeliverableChannelException.class)
+    ProblemDetail handleUndeliverableChannel(UndeliverableChannelException exception) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST,
+                "One or more fields of the request body are invalid");
+        problem.setProperty("errors", Map.of("channel",
+                "must be one of " + exception.deliverable().describe()));
+        return problem;
+    }
+
+    /**
      * The last resort, so that no caller ever receives the container's own error page in place of
      * a problem detail. The cause is written to the log and not to the response: the caller can do
      * nothing with a stack trace, and an unhandled failure is the worst place to start describing
@@ -143,8 +176,21 @@ class ApiExceptionHandler extends ResponseEntityExceptionHandler {
                 .collect(Collectors.joining("."));
     }
 
-    private static String reasonFor(InvalidFormatException invalidValue) {
+    /**
+     * Names the values a caller may send, and for {@link Channel} that is not the same list as
+     * the type's own constants.
+     *
+     * <p>A channel exists in the model and is deliverable only where an adapter is wired, so the
+     * enum's constants are what parses and the deliverable set is what works. Answering with the
+     * constants would advertise a channel this deployment refuses -- and a caller that took the
+     * advice would be told, on its next request, that it may not send what it had just been told
+     * to send.
+     */
+    private String reasonFor(InvalidFormatException invalidValue) {
         Class<?> expected = invalidValue.getTargetType();
+        if (expected == Channel.class) {
+            return "must be one of " + deliverableChannels.describe();
+        }
         if (expected != null && expected.isEnum()) {
             String allowed = java.util.Arrays.stream(expected.getEnumConstants())
                     .map(String::valueOf)

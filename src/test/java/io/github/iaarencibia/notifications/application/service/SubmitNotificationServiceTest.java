@@ -1,6 +1,8 @@
 package io.github.iaarencibia.notifications.application.service;
 
+import io.github.iaarencibia.notifications.application.DeliverableChannels;
 import io.github.iaarencibia.notifications.application.port.in.SubmitNotificationCommand;
+import io.github.iaarencibia.notifications.application.port.in.UndeliverableChannelException;
 import io.github.iaarencibia.notifications.application.port.out.IdempotencyKeyAlreadyUsedException;
 import io.github.iaarencibia.notifications.application.port.out.NotificationRepository;
 import io.github.iaarencibia.notifications.domain.Channel;
@@ -17,6 +19,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -36,9 +39,36 @@ class SubmitNotificationServiceTest {
     private static final CorrelationId CORRELATION_ID = new CorrelationId("order-4471");
     private static final int MAX_ATTEMPTS = 3;
 
+    /** What the deployment under test can deliver. The payload below uses SERVICE. */
+    private static final DeliverableChannels DELIVERABLE =
+            new DeliverableChannels(Set.of(Channel.LOG, Channel.SERVICE));
+
     private final InMemoryNotifications repository = new InMemoryNotifications();
     private final SubmitNotificationService service =
-            new SubmitNotificationService(repository, MAX_ATTEMPTS);
+            new SubmitNotificationService(repository, MAX_ATTEMPTS, DELIVERABLE);
+
+    @Test
+    @DisplayName("refuses a channel nothing can deliver, and writes no row")
+    void refusesAnUndeliverableChannel() {
+        // EMAIL is a legal value of the domain type and has no adapter in this deployment.
+        // Accepting it would answer the caller 202 and leave a row that fails every attempt
+        // until its budget ran out -- a delivery reported as accepted that was never possible.
+        NotificationPayload toEmail = new NotificationPayload("someone@example.test",
+                Channel.EMAIL, "Your order shipped", "It is on its way.", Priority.HIGH, Map.of());
+
+        assertThatExceptionOfType(UndeliverableChannelException.class)
+                .isThrownBy(() -> service.submit(
+                        new SubmitNotificationCommand(toEmail, CORRELATION_ID, "key-email")))
+                .satisfies(thrown -> {
+                    assertThat(thrown.channel()).isEqualTo(Channel.EMAIL);
+                    // Sorted and named as they travel, so the caller is told what to use instead.
+                    assertThat(thrown.deliverable().describe()).isEqualTo("LOG, SERVICE");
+                });
+
+        assertThat(repository.stored())
+                .as("nothing may be stored for a notification that cannot be sent")
+                .isEmpty();
+    }
 
     @Test
     @DisplayName("stores the notification and answers with its identifier")
@@ -77,7 +107,7 @@ class SubmitNotificationServiceTest {
         // Persisted per row on purpose: a notification keeps the budget it was promised even if
         // the configuration changes while it is still in flight.
         SubmitNotificationService withADifferentBudget =
-                new SubmitNotificationService(repository, 7);
+                new SubmitNotificationService(repository, 7, DELIVERABLE);
 
         withADifferentBudget.submit(
                 new SubmitNotificationCommand(payload(), CORRELATION_ID, "key-1"));

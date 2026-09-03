@@ -42,7 +42,7 @@ record SubmitNotificationRequest(
         @CharacterLength(max = NotificationPayload.MAX_RECIPIENT_LENGTH)
         String recipient,
 
-        @NotNull(message = "must be one of LOG, SERVICE, EMAIL")
+        @NotNull(message = "must be present")
         Channel channel,
 
         @NotBlank(message = "must not be blank")
@@ -53,7 +53,7 @@ record SubmitNotificationRequest(
         @CharacterLength(max = NotificationPayload.MAX_BODY_LENGTH)
         String body,
 
-        @NotNull(message = "must be one of LOW, MEDIUM, HIGH")
+        @NotNull(message = "must be present")
         Priority priority,
 
         @Size(max = NotificationPayload.MAX_METADATA_ENTRIES,

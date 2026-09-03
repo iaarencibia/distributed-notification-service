@@ -8,6 +8,8 @@ import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.boot.test.context.runner.ContextConsumer;
 import org.springframework.context.annotation.Configuration;
 
+import java.time.Duration;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -33,9 +35,21 @@ class NotificationsPropertiesTest {
     private static final String VALID_INSTANCE_ID = "notifications.instance-id=notification-service-1";
     private static final String VALID_API_KEY = "notifications.security.api-key=a-development-key";
     private static final String VALID_MAX_ATTEMPTS = "notifications.retry.max-attempts=3";
+    private static final String VALID_CONNECT_TIMEOUT =
+            "notifications.channels.service.connect-timeout=2s";
+    private static final String VALID_READ_TIMEOUT =
+            "notifications.channels.service.read-timeout=5s";
 
-    private final ApplicationContextRunner runner =
-            new ApplicationContextRunner().withUserConfiguration(BindProperties.class);
+    /**
+     * Carries the channel timeouts, because every case below needs them present and none of them
+     * is about them. The cases that <em>are</em> use {@link #bareRunner} and say so.
+     */
+    private final ApplicationContextRunner runner = bareRunner()
+            .withPropertyValues(VALID_CONNECT_TIMEOUT, VALID_READ_TIMEOUT);
+
+    private static ApplicationContextRunner bareRunner() {
+        return new ApplicationContextRunner().withUserConfiguration(BindProperties.class);
+    }
 
     @Test
     @DisplayName("binds a complete configuration onto the typed properties")
@@ -49,7 +63,50 @@ class NotificationsPropertiesTest {
                     assertThat(properties.instanceId()).isEqualTo("notification-service-1");
                     assertThat(properties.security().apiKey()).isEqualTo("a-development-key");
                     assertThat(properties.retry().maxAttempts()).isEqualTo(3);
+                    assertThat(properties.channels().service().connectTimeout())
+                            .isEqualTo(Duration.ofSeconds(2));
+                    assertThat(properties.channels().service().readTimeout())
+                            .isEqualTo(Duration.ofSeconds(5));
                 });
+    }
+
+    @Test
+    @DisplayName("refuses to start when the channel timeouts are absent altogether")
+    void rejectsMissingChannelsBlock() {
+        bareRunner().withPropertyValues(VALID_INSTANCE_ID, VALID_API_KEY, VALID_MAX_ATTEMPTS)
+                .run(failsNaming("channels", "must not be null"));
+    }
+
+    @Test
+    @DisplayName("refuses to start on a read timeout of zero, which means waiting forever")
+    void rejectsANonPositiveReadTimeout() {
+        // Not a pedantic bound. A client with no read timeout keeps a worker thread parked on a
+        // destination that accepted the connection and went quiet, and with a bounded pool that
+        // is how one slow destination stops every other notification waiting behind it.
+        bareRunner().withPropertyValues(VALID_INSTANCE_ID, VALID_API_KEY, VALID_MAX_ATTEMPTS,
+                        VALID_CONNECT_TIMEOUT, "notifications.channels.service.read-timeout=0s")
+                .run(failsNaming("readTimeout", "must be positive"));
+    }
+
+    @Test
+    @DisplayName("refuses to start when only one of the two channel timeouts is configured")
+    void rejectsAHalfConfiguredChannel() {
+        // The positivity guard skips a null and leaves it to @NotNull, which is right and which
+        // nothing checks: swapping that condition would let a half-configured channel bind, and
+        // the missing timeout would become "no timeout" at the first slow destination.
+        bareRunner().withPropertyValues(VALID_INSTANCE_ID, VALID_API_KEY, VALID_MAX_ATTEMPTS,
+                        VALID_CONNECT_TIMEOUT)
+                .run(failsNaming("readTimeout", "must not be null"));
+    }
+
+    @Test
+    @DisplayName("refuses to start on a connect timeout of zero as well")
+    void rejectsANonPositiveConnectTimeout() {
+        // Asserted separately from its sibling: one guard covering both would look identical in
+        // the code and leave whichever half is untested free to be deleted.
+        bareRunner().withPropertyValues(VALID_INSTANCE_ID, VALID_API_KEY, VALID_MAX_ATTEMPTS,
+                        VALID_READ_TIMEOUT, "notifications.channels.service.connect-timeout=0s")
+                .run(failsNaming("connectTimeout", "must be positive"));
     }
 
     @Test

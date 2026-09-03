@@ -233,8 +233,10 @@ class NotificationIntakeIT extends IntegrationTestSupport {
                 .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
                 .andExpect(jsonPath("$.errors.recipient").value("must not be blank"))
                 .andExpect(jsonPath("$.errors.subject").value("must not be blank"))
-                .andExpect(jsonPath("$.errors.channel").value("must be one of LOG, SERVICE, EMAIL"))
-                .andExpect(jsonPath("$.errors.priority").value("must be one of LOW, MEDIUM, HIGH"))
+                // Absent, so the answer is that it is missing. Which channels may be sent is a
+                // different question, and it is answered where the caller actually asked one.
+                .andExpect(jsonPath("$.errors.channel").value("must be present"))
+                .andExpect(jsonPath("$.errors.priority").value("must be present"))
                 .andExpect(jsonPath("$.errors.body").exists());
     }
 
@@ -253,7 +255,7 @@ class NotificationIntakeIT extends IntegrationTestSupport {
                 .andExpect(jsonPath("$.errors.subject").value("must not be blank"))
                 .andExpect(jsonPath("$.errors.body")
                         .value("must be present, though it may be empty"))
-                .andExpect(jsonPath("$.errors.priority").value("must be one of LOW, MEDIUM, HIGH"))
+                .andExpect(jsonPath("$.errors.priority").value("must be present"))
                 .andExpect(jsonPath("$.errors.channel").doesNotExist());
     }
 
@@ -262,9 +264,13 @@ class NotificationIntakeIT extends IntegrationTestSupport {
     void refusesAnUnknownChannel() throws Exception {
         // Jackson rejects this before validation ever runs, so without a handler for it the
         // caller would be told only that the body was unreadable.
+        //
+        // And the list it is offered is what this deployment can deliver, not what the type can
+        // parse -- EMAIL is a constant of the enum and has no adapter. Naming the constants here
+        // would tell a caller to send something that its next request would be refused for.
         mockMvc.perform(submit(VALID_BODY.replace("\"SERVICE\"", "\"SMS\"")))
                 .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.errors.channel").value("must be one of LOG, SERVICE, EMAIL"));
+                .andExpect(jsonPath("$.errors.channel").value("must be one of LOG, SERVICE"));
     }
 
     @Test
@@ -274,6 +280,34 @@ class NotificationIntakeIT extends IntegrationTestSupport {
                         "https://destination.test/" + "x".repeat(2048))))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.errors.recipient").value("must not exceed 2048 characters"));
+    }
+
+    @Test
+    @DisplayName("names the priorities a caller may send, not just that the value was wrong")
+    void refusesAnUnknownPriority() throws Exception {
+        // The counterpart of the channel case, and the one that keeps the generic enum branch
+        // honest: priority has no deployment-dependent subset, so its constants are the answer.
+        // Without this, that branch could be reduced to "is not of the expected type" and the
+        // brief's requirement for descriptive errors would be lost with the suite still green.
+        mockMvc.perform(submit(VALID_BODY.replace("\"HIGH\"", "\"URGENT\"")))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.errors.priority").value("must be one of LOW, MEDIUM, HIGH"));
+    }
+
+    @Test
+    @DisplayName("refuses a channel this deployment has no adapter for, and writes no row")
+    void refusesAnUndeliverableChannel() throws Exception {
+        // EMAIL is a legal value of the type and of the column's check constraint, and nothing
+        // wired into this deployment can send it. Accepting it would answer 202 and leave a row
+        // failing every attempt until its budget ran out.
+        mockMvc.perform(submit(VALID_BODY.replace("\"SERVICE\"", "\"EMAIL\""))
+                        .header("Idempotency-Key", "it-email"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.errors.channel").value("must be one of LOG, SERVICE"));
+
+        assertThat(countOf("it-email"))
+                .as("a notification nothing can deliver must not be stored")
+                .isZero();
     }
 
     @Test

@@ -3,8 +3,9 @@ package io.github.iaarencibia.notifications.application.port.in;
 import java.util.UUID;
 
 /**
- * Accepting a notification for delivery. The only thing the outside world can ask of this service
- * today; the dispatch loop and the lookup arrive with the use cases that own them.
+ * Accepting a notification for delivery: the way work enters the system, and the only one a
+ * caller drives. What becomes of it afterwards belongs to the dispatcher, which no request
+ * reaches.
  */
 public interface SubmitNotificationUseCase {
 

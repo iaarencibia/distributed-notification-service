@@ -6,6 +6,7 @@ import io.github.iaarencibia.notifications.application.port.in.SubmitNotificatio
 import io.github.iaarencibia.notifications.application.port.in.UndeliverableChannelException;
 import io.github.iaarencibia.notifications.application.port.out.IdempotencyKeyAlreadyUsedException;
 import io.github.iaarencibia.notifications.application.port.out.NotificationRepository;
+import io.github.iaarencibia.notifications.application.port.out.SystemClock;
 import io.github.iaarencibia.notifications.domain.Channel;
 import io.github.iaarencibia.notifications.domain.Notification;
 
@@ -30,20 +31,24 @@ import java.util.UUID;
 public class SubmitNotificationService implements SubmitNotificationUseCase {
 
     private final NotificationRepository repository;
+    private final SystemClock clock;
     private final int maxAttempts;
     private final DeliverableChannels deliverableChannels;
 
     /**
      * @param repository          where notifications are stored, and by that fact queued
+     * @param clock               the one clock. The instant stamped here is compared against it by
+     *                            the claim query, so it cannot come from anywhere else
      * @param maxAttempts         the delivery budget stamped on every notification as it is
      *                            created
      * @param deliverableChannels what this deployment can actually send. This service has to know
      *                            what is deliverable and nothing about how, so it is handed the
      *                            answer rather than the adapters that produce it
      */
-    public SubmitNotificationService(NotificationRepository repository, int maxAttempts,
-            DeliverableChannels deliverableChannels) {
+    public SubmitNotificationService(NotificationRepository repository, SystemClock clock,
+            int maxAttempts, DeliverableChannels deliverableChannels) {
         this.repository = Objects.requireNonNull(repository, "repository must not be null");
+        this.clock = Objects.requireNonNull(clock, "clock must not be null");
         this.maxAttempts = maxAttempts;
         this.deliverableChannels =
                 Objects.requireNonNull(deliverableChannels, "deliverableChannels must not be null");
@@ -61,13 +66,10 @@ public class SubmitNotificationService implements SubmitNotificationUseCase {
             throw new UndeliverableChannelException(channel, deliverableChannels);
         }
 
-        // Read from the JVM. The rule is that every instant the domain sees comes from
-        // PostgreSQL, and it is applied in the PR that brings the dispatcher, where a skew
-        // between instances is what makes the reaper rescue rows that are still being sent. In
-        // the delivered stack the application and the database share a host, so the difference
-        // here is zero; across machines it would delay a first attempt by the skew and nothing
-        // more, because being late to become claimable is harmless.
-        Instant now = Instant.now();
+        // The shared clock, not this machine's. This instant becomes next_attempt_at, and the
+        // claim query decides what is due by comparing it against the database's own now(): read
+        // from the JVM, an instance running ahead would queue work nobody may take yet.
+        Instant now = clock.now();
 
         Notification notification = Notification.submit(UUID.randomUUID(), command.payload(),
                 command.correlationId(), command.idempotencyKey(), maxAttempts, now);

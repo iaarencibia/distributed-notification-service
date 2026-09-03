@@ -14,6 +14,7 @@ import io.github.iaarencibia.notifications.domain.Priority;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -43,9 +44,15 @@ class SubmitNotificationServiceTest {
     private static final DeliverableChannels DELIVERABLE =
             new DeliverableChannels(Set.of(Channel.LOG, Channel.SERVICE));
 
+    /**
+     * A value no machine clock would produce, so an instant that came from {@code Instant.now()}
+     * instead of from the port is visible rather than merely plausible.
+     */
+    private static final Instant SHARED_NOW = Instant.parse("2026-09-03T10:00:00Z");
+
     private final InMemoryNotifications repository = new InMemoryNotifications();
     private final SubmitNotificationService service =
-            new SubmitNotificationService(repository, MAX_ATTEMPTS, DELIVERABLE);
+            new SubmitNotificationService(repository, () -> SHARED_NOW, MAX_ATTEMPTS, DELIVERABLE);
 
     @Test
     @DisplayName("refuses a channel nothing can deliver, and writes no row")
@@ -102,12 +109,27 @@ class SubmitNotificationServiceTest {
     }
 
     @Test
+    @DisplayName("stamps the shared clock's instant, not this machine's")
+    void stampsTheSharedClock() {
+        // The claim query decides what is due by comparing next_attempt_at against the database's
+        // own now(). Written from the JVM, an instance running ahead of the database queues work
+        // that nothing may take yet -- and the answer this project gives to "what clock does the
+        // system use" would be false.
+        service.submit(new SubmitNotificationCommand(payload(), CORRELATION_ID, "key-clock"));
+
+        Notification stored = repository.only();
+        assertThat(stored.createdAt()).isEqualTo(SHARED_NOW);
+        assertThat(stored.updatedAt()).isEqualTo(SHARED_NOW);
+        assertThat(stored.nextAttemptAt()).isEqualTo(SHARED_NOW);
+    }
+
+    @Test
     @DisplayName("stamps the configured budget on the row, not a number of its own")
     void stampsTheConfiguredBudget() {
         // Persisted per row on purpose: a notification keeps the budget it was promised even if
         // the configuration changes while it is still in flight.
         SubmitNotificationService withADifferentBudget =
-                new SubmitNotificationService(repository, 7, DELIVERABLE);
+                new SubmitNotificationService(repository, () -> SHARED_NOW, 7, DELIVERABLE);
 
         withADifferentBudget.submit(
                 new SubmitNotificationCommand(payload(), CORRELATION_ID, "key-1"));

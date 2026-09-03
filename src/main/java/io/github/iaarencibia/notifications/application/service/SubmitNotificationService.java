@@ -1,9 +1,12 @@
 package io.github.iaarencibia.notifications.application.service;
 
+import io.github.iaarencibia.notifications.application.DeliverableChannels;
 import io.github.iaarencibia.notifications.application.port.in.SubmitNotificationCommand;
 import io.github.iaarencibia.notifications.application.port.in.SubmitNotificationUseCase;
+import io.github.iaarencibia.notifications.application.port.in.UndeliverableChannelException;
 import io.github.iaarencibia.notifications.application.port.out.IdempotencyKeyAlreadyUsedException;
 import io.github.iaarencibia.notifications.application.port.out.NotificationRepository;
+import io.github.iaarencibia.notifications.domain.Channel;
 import io.github.iaarencibia.notifications.domain.Notification;
 
 import java.time.Instant;
@@ -28,19 +31,35 @@ public class SubmitNotificationService implements SubmitNotificationUseCase {
 
     private final NotificationRepository repository;
     private final int maxAttempts;
+    private final DeliverableChannels deliverableChannels;
 
     /**
-     * @param repository  where notifications are stored, and by that fact queued
-     * @param maxAttempts the delivery budget stamped on every notification as it is created
+     * @param repository          where notifications are stored, and by that fact queued
+     * @param maxAttempts         the delivery budget stamped on every notification as it is
+     *                            created
+     * @param deliverableChannels what this deployment can actually send. This service has to know
+     *                            what is deliverable and nothing about how, so it is handed the
+     *                            answer rather than the adapters that produce it
      */
-    public SubmitNotificationService(NotificationRepository repository, int maxAttempts) {
+    public SubmitNotificationService(NotificationRepository repository, int maxAttempts,
+            DeliverableChannels deliverableChannels) {
         this.repository = Objects.requireNonNull(repository, "repository must not be null");
         this.maxAttempts = maxAttempts;
+        this.deliverableChannels =
+                Objects.requireNonNull(deliverableChannels, "deliverableChannels must not be null");
     }
 
     @Override
     public UUID submit(SubmitNotificationCommand command) {
         Objects.requireNonNull(command, "command must not be null");
+
+        // Refused here rather than at dispatch. Accepting a notification no adapter can send
+        // would answer 202 and then leave a row failing every attempt until its budget ran out:
+        // the caller would have been told its delivery was accepted, and it never was.
+        Channel channel = command.payload().channel();
+        if (!deliverableChannels.includes(channel)) {
+            throw new UndeliverableChannelException(channel, deliverableChannels);
+        }
 
         // Read from the JVM. The rule is that every instant the domain sees comes from
         // PostgreSQL, and it is applied in the PR that brings the dispatcher, where a skew

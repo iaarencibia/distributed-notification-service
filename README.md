@@ -244,7 +244,7 @@ llamador necesita saber es que la entrega que pidió todavía no ocurrió.
 | Campo | Tipo | | |
 | --- | --- | --- | --- |
 | `recipient` | `string` | obligatorio | Destino. Una URL para el canal `SERVICE`. Máx. 2048 |
-| `channel` | `enum` | obligatorio | `LOG` · `SERVICE` · `EMAIL` |
+| `channel` | `enum` | obligatorio | `LOG` · `SERVICE`. `EMAIL` existe en el modelo y hoy no se entrega: ver *[Canales de despacho](#canales-de-despacho-log-y-service)* |
 | `subject` | `string` | obligatorio | Máx. 512 |
 | `body` | `string` | obligatorio | Máx. 16384. Puede ir vacío: un aviso de solo asunto es legítimo |
 | `priority` | `enum` | obligatorio | `LOW` · `MEDIUM` · `HIGH` |
@@ -350,7 +350,7 @@ Content-Type: application/problem+json
  "detail":"One or more fields of the request body are invalid",
  "instance":"/api/v1/notifications",
  "errors":{"body":"must be present, though it may be empty",
-           "priority":"must be one of LOW, MEDIUM, HIGH",
+           "priority":"must be present",
            "recipient":"must not be blank",
            "subject":"must not be blank"}}
 ```
@@ -375,8 +375,14 @@ a correr, así que ese caso se reporta solo:
 {"type":"about:blank","title":"Bad Request","status":400,
  "detail":"The request body could not be read as JSON",
  "instance":"/api/v1/notifications",
- "errors":{"channel":"must be one of LOG, SERVICE, EMAIL"}}
+ "errors":{"channel":"must be one of LOG, SERVICE"}}
 ```
+
+Esa lista es **la de los canales que este despliegue puede entregar**, no la de los valores que
+el tipo sabe leer. `EMAIL` es una constante del enum y no tiene adaptador, así que nombrarlo aquí
+sería aconsejarle al cliente que mande justo lo que su siguiente petición sería rechazada por
+mandar. Un canal apagado y uno que no existe se responden igual porque, desde afuera, son el
+mismo problema: pediste algo que no podés usar.
 
 Los errores los producen **dos componentes distintos**, y no es un descuido: el `401` lo escribe
 la cadena de seguridad, que rechaza la petición antes de que llegue a ningún controlador, y el
@@ -466,8 +472,8 @@ las rutas las resuelve Compose y no el intérprete.
 Salida esperada, en dos bloques:
 
 ```
-[INFO] Tests run: 141, Failures: 0, Errors: 0, Skipped: 0     ← unitarios
-[INFO] Tests run: 46, Failures: 0, Errors: 0, Skipped: 0      ← integración
+[INFO] Tests run: 178, Failures: 0, Errors: 0, Skipped: 0     ← unitarios
+[INFO] Tests run: 47, Failures: 0, Errors: 0, Skipped: 0      ← integración
 [INFO] BUILD SUCCESS
 ```
 
@@ -686,17 +692,74 @@ un fallo transitorio y uno permanente, que es el núcleo del requisito de resili
 | Respuesta del destino | Clasificación |
 | --- | --- |
 | `2xx` | Éxito |
-| `5xx`, timeout, conexión rechazada | Fallo transitorio: reintentar con backoff |
-| `400`, `404`, `422` | Fallo permanente: no reintentar |
-| `429` | Fallo transitorio, respetando `Retry-After` |
+| `429` | Fallo transitorio, respetando el `Retry-After` que el destino pida |
+| Cualquier otro `4xx` | Fallo permanente: no reintentar |
+| `5xx`, timeout, conexión rechazada, host que no resuelve | Fallo transitorio: reintentar con *backoff* |
+
+El orden de esa tabla es el orden en que se evalúa, y `429` va antes que el resto de los `4xx` a
+propósito: es un `4xx` por número y un fallo transitorio por significado. El destino no está
+rechazando el mensaje, está pidiendo menos tráfico. Clasificado con su familia numérica,
+quemaría una notificación por la única razón que se resuelve sola.
+
+Cualquier código que no sea ninguno de esos —un `3xx`, un `1xx`— se trata como transitorio. El
+error caro es descartar una notificación que la próxima vez habría entregado.
+
+`Retry-After` se lee **solo en su forma de segundos**. La forma de fecha HTTP es legal y se
+ignora a propósito: honrarla es confiar en el reloj del destino contra el nuestro, y un desfase
+ahí se convierte en una notificación durmiendo horas. Ausente o ilegible significa "sin
+instrucción", y la política de reintentos usa su propio *backoff*, que nunca es peor que lo que
+habría hecho igual.
 
 Un servidor SMTP de pruebas como Mailhog acepta prácticamente cualquier mensaje, por lo que
-no permite demostrar esa diferencia. Con WireMock, en cambio, el reintento es observable:
-una sola notificación enviada a `/hook/flaky` produce una secuencia visible de intentos.
+no permite demostrar esa diferencia. Con WireMock, en cambio, el reintento va a ser observable
+en cuanto exista el despachador: una sola notificación enviada a `/hook/flaky` producirá una
+secuencia visible de intentos.
 
-`EMAIL` queda fuera del alcance entregado. Gracias al puerto de canal, incorporarlo consiste
-en añadir una implementación y un contenedor al stack, sin tocar el dominio ni los casos de
-uso.
+#### Qué recibe el destino del canal `SERVICE`
+
+Un `POST` con `Content-Type: application/json`, el contenido que envió el cliente, y dos
+cabeceras:
+
+| Cabecera | Para qué |
+| --- | --- |
+| `X-Notification-Id` | Identifica **esta notificación**. Es lo que le permite al destino descartar una entrega que ya aceptó, si este servicio reintentó una que en realidad había llegado |
+| `X-Correlation-Id` | Agrupa la notificación con el resto de su operación, del lado del destino también |
+
+```json
+{
+  "recipient": "http://wiremock:8080/hook/ok",
+  "subject": "Tu pedido fue enviado",
+  "body": "Va en camino.",
+  "priority": "HIGH",
+  "metadata": {"orderId": "4471"}
+}
+```
+
+**No viaja nada del ciclo de vida** —ni el estado, ni el número de intento, ni el presupuesto—.
+Eso es asunto de este servicio, y un destino que recibiera un contador de intentos estaría
+leyendo un estado sobre el que no tiene voz. Lo único que necesita para actuar es el contenido y
+el identificador con el que reconocer un repetido.
+
+Ambos *timeouts* son obligatorios y se configuran en `notifications.channels.service`. El de
+lectura es el que más importa: el de conexión solo cubre a un destino que nunca acepta la
+conexión, y un destino que **acepta y después se queda callado** es el fallo más común, y el más
+caro, porque retiene un trabajador mientras dura.
+
+#### `EMAIL` existe en el modelo y está apagado
+
+`Channel` tiene sus tres valores porque el enunciado nombra tres, y el `CHECK` de la columna los
+admite. Lo que no existe es un adaptador que lo entregue, así que **el ingreso lo rechaza con un
+`400`** en lugar de aceptarlo.
+
+Aceptarlo sería peor que rechazarlo: la respuesta sería un `202` y la fila quedaría fallando en
+cada intento hasta agotar su presupuesto. Al cliente se le habría dicho que su entrega fue
+aceptada, y nunca lo fue.
+
+Qué se puede entregar **sale del registro de canales**, no de una lista escrita a mano: es el
+conjunto de adaptadores conectados al arrancar. De ahí lo leen tanto el caso de uso, que decide,
+como el manejador de errores, que redacta el mensaje —así la decisión y su explicación no pueden
+separarse—. El día que se agregue una implementación de `EMAIL`, empieza a aceptarse y los
+mensajes de error cambian solos, sin tocar ninguna validación.
 
 ### Esquema de base de datos
 
@@ -899,6 +962,11 @@ Se eligieron `LOG` y `SERVICE`, y el motivo está explicado más arriba. Incorpo
 consiste en añadir una implementación del puerto de canal y un servidor SMTP de pruebas al
 stack; no requiere cambios en el dominio ni en los casos de uso.
 
+El precio, y es real: **un cliente que pida `EMAIL` recibe un `400`** aunque el enunciado liste
+ese canal entre los posibles. Se prefirió eso a aceptarlo y no entregarlo nunca, que le mentiría
+al llamador en el peor momento —cuando cree que su aviso salió—. El rechazo nombra los canales
+que sí funcionan, así que el cliente sabe qué hacer con la respuesta.
+
 ### Una clave de idempotencia repetida no compara el cuerpo de la petición
 
 Si llega dos veces la misma `Idempotency-Key` con contenidos distintos, se devuelve la
@@ -929,6 +997,8 @@ el trabajo del despachador, pero eso mitiga el problema sin resolverlo.
 | Tests unitarios | Completo |
 | Tests de integración | Completo |
 | API REST de consulta (`GET /api/v1/notifications/{id}`) | Pendiente — el estado se consulta hoy contra la base de datos, como muestra *Cómo inspeccionar el estado* |
-| Worker de despacho y canales | Pendiente |
-| Idempotencia de salida (`X-Notification-Id`) | Pendiente — la escribe el canal `SERVICE`, que llega con el despachador |
+| Canales de despacho (`LOG` y `SERVICE`) | Completo — con sus tests, aún sin worker que los invoque |
+| Worker de despacho | Pendiente — sin él, una notificación aceptada queda `PENDING` y no se entrega |
+| Canal `EMAIL` | Pendiente — el ingreso lo rechaza en lugar de aceptar algo que no puede enviar |
+| Idempotencia de salida (`X-Notification-Id`) | Completo — el canal `SERVICE` la envía en cada entrega |
 | Consideración sobre Jakarta EE | Pendiente |

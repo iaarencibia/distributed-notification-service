@@ -17,6 +17,7 @@ con reintentos y registro de fallos.
 - [Cómo correr los tests](#cómo-correr-los-tests)
 - [Decisiones de diseño](#decisiones-de-diseño)
 - [Trade-offs y limitaciones](#trade-offs-y-limitaciones)
+- [Consideración sobre Jakarta EE](#consideración-sobre-jakarta-ee)
 - [Estado de la implementación](#estado-de-la-implementación)
 
 ---
@@ -1142,6 +1143,121 @@ el trabajo del despachador, pero eso mitiga el problema sin resolverlo.
 
 ---
 
+## Consideración sobre Jakarta EE
+
+> *Si este servicio debiera deployarse en un servidor de aplicaciones Jakarta EE (como WildFly),
+> ¿qué cambiarías en el diseño y por qué?*
+
+Son dos problemas distintos y conviene no mezclarlos: **desplegar en WildFly** y **convertirse en
+una aplicación Jakarta EE**. El primero no exige el segundo. Empezaría por el modelo de
+despliegue, que es lo que la pregunta plantea, y dejaría la migración de tecnologías como un paso
+posterior y opcional.
+
+### Primero, el modelo de despliegue
+
+No migraría la aplicación de Spring Boot a Jakarta EE para poder desplegarla. Adaptaría cómo se
+empaqueta y quién administra sus recursos:
+
+- **Empaquetar como WAR** en lugar de un JAR ejecutable.
+- **Declarar el contenedor servlet embebido con alcance `provided`**, para que el runtime lo
+  aporte WildFly y no viaje duplicado dentro del artefacto.
+- **Arrancar a través de `SpringBootServletInitializer`**, que es como Boot cede el control del
+  ciclo de vida al servidor.
+- **Tomar del servidor los recursos que administra**: el `DataSource`, las transacciones, la
+  seguridad y la configuración, en lugar de que Spring los construya por su cuenta. Ahí es donde
+  aparecen los conflictos si las dos infraestructuras intentan gobernar lo mismo.
+- **Verificar el *classloading*** contra la versión concreta de WildFly, que es la fricción que
+  no se resuelve leyendo documentación sino desplegando.
+
+Ninguno de esos pasos toca una regla de negocio.
+
+### Por qué eso alcanza
+
+Porque el código que habla con el framework está acotado, y se puede contar en lugar de
+afirmarlo:
+
+```bash
+grep -rl "import org.springframework" src/main/java --include=*.java | wc -l   # 16
+find src/main/java -name "*.java" | wc -l                                      # 55
+```
+
+Dieciséis archivos de cincuenta y cinco: tres adaptadores de entrada, siete de salida, cinco
+clases de configuración y la de arranque. Ninguno tiene lógica de negocio. Los treinta archivos
+del dominio y de la capa de aplicación no importan **ningún** framework:
+
+```bash
+grep -rl "import org.springframework" \
+  src/main/java/io/github/iaarencibia/notifications/domain \
+  src/main/java/io/github/iaarencibia/notifications/application   # sin resultados
+```
+
+Además, **las entidades y las validaciones ya son Jakarta**: Spring Boot 3 corre sobre el espacio
+de nombres `jakarta.*`, así que `@Entity`, `@Column`, `@NotNull` y `@Size` son las mismas
+anotaciones que implementa WildFly. Eso no es mérito de este diseño —es la migración que hizo
+Spring en su versión 3—, pero cuenta a favor igual. Y el SQL tampoco se mueve: `FOR UPDATE SKIP
+LOCKED` viaja como consulta nativa a través de `EntityManager`, que es API de Jakarta
+Persistence. La pieza más específica del despachador es la que menos se entera del cambio.
+
+### Lo que verificaría antes de darlo por hecho
+
+**La demarcación transaccional, y es lo primero.** El ingreso depende de que un `insert` fallido
+esté terminado y revertido antes de que corra la consulta que lo sigue; por eso cada método del
+store lleva su propia transacción corta y el caso de uso no es transaccional. Con las
+transacciones pasando a manos del servidor, ese comportamiento hay que volver a comprobarlo bajo
+JTA con un test de integración, no leyendo código. Es la parte del diseño que más depende de un
+comportamiento exacto del entorno.
+
+**Los hilos del despachador quedan fuera del contrato del contenedor.** El pool de entregas lo
+crea Spring, y en un despliegue WAR el servidor no se entera de que existe. Funciona, pero un
+servidor de aplicaciones espera administrar los hilos él. Preferimos decirlo antes que
+descubrirlo: en esta etapa es una desprolijidad tolerada, y en la siguiente se corrige.
+
+### Después, y solo si el objetivo es aprovechar el servidor
+
+Si más adelante se quisiera usar de verdad lo que Jakarta EE ofrece, la migración puede ser
+progresiva: CDI en lugar del contenedor de Spring, Jakarta REST en lugar de Spring MVC, Jakarta
+Transactions en lugar de la abstracción transaccional de Spring. Adaptador por adaptador, porque
+los puertos no se mueven — durante la transición el dominio no queda acoplado a ninguna de las
+dos tecnologías, y eso es lo que permite hacerla incremental en vez de en un solo salto.
+
+Dos cosas de esa etapa son decisiones, no traducciones.
+
+**La contrapresión del despachador hay que rediseñarla.** Hoy el pool está acotado en tamaño y en
+cola, con `CallerRunsPolicy`: cuando la cola se llena, el hilo que sondea hace la entrega él
+mismo y mientras tanto deja de reclamar trabajo, así que el atraso se queda en la tabla —que es
+durable— y no en memoria. Un `ManagedExecutorService` no expone esa opción, de modo que el límite
+pasa a ser el tamaño del lote: reclamar solo lo que el executor puede aceptar y dejar que el
+intervalo de sondeo marque el ritmo. Es el único punto donde hay que volver a decidir algo en
+lugar de traducirlo.
+
+**La traducción de excepciones cambia de dueño, y por eso el puerto no habla de Spring.** Hoy
+Spring convierte el fallo de estado obsoleto del proveedor en `OptimisticLockingFailureException`
+en el borde del bean `@Repository`. Sin Spring, eso pasa a hacerlo el adaptador atrapando
+`jakarta.persistence.OptimisticLockException`. El cambio es un `catch` en un archivo y la capa de
+aplicación no se mueve, porque el puerto habla de `ClaimLostException`, un tipo propio que se
+decidió así en el PR 3 por esta misma razón.
+
+### Lo que no cambiaría, aunque el contenedor lo ofrezca
+
+**No convertiría los casos de uso en EJB.** Son clases planas, cableadas desde una configuración,
+sin una sola anotación encima. Adoptar `@Stateless` desharía eso para no ganar nada: no necesitan
+*pooling*, ni transacciones declarativas propias, ni acceso remoto.
+
+**No adoptaría un *timer* EJB en clúster.** El diseño ya tolera varias instancias sondeando a la
+vez —de eso se trata `SKIP LOCKED`—, así que un temporizador por nodo es correcto y suficiente.
+Un *singleton* de clúster reduciría el rendimiento y agregaría un punto de coordinación que hoy
+no existe. Cuando el modelo ya resuelve la concurrencia, la infraestructura no tiene que volver a
+resolverla.
+
+### Lo que cuesta
+
+En la primera etapa el artefacto pasa a ser un WAR desplegado en un servidor, así que
+`docker compose up` cambia de imagen y la promesa de *"funciona en una máquina sin configuración
+previa"* hay que volver a verificarla. En la segunda, sin autoconfiguración el cableado se vuelve
+explícito: más código, aunque del mismo que ya se escribe a mano en `UseCaseConfig`.
+
+---
+
 ## Estado de la implementación
 
 | Componente | Estado |
@@ -1161,4 +1277,4 @@ el trabajo del despachador, pero eso mitiga el problema sin resolverlo.
 | Worker de despacho, reintentos y *reaper* | Completo |
 | Canal `EMAIL` | Pendiente — el ingreso lo rechaza en lugar de aceptar algo que no puede enviar |
 | Idempotencia de salida (`X-Notification-Id`) | Completo — el canal `SERVICE` la envía en cada entrega |
-| Consideración sobre Jakarta EE | Pendiente |
+| Consideración sobre Jakarta EE | Completo |
